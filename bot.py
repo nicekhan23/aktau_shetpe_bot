@@ -212,10 +212,6 @@ def aktau_locations_keyboard():
     )
     return keyboard
 
-# Төлем статустары
-PAYMENT_STATUS_PAID = "✅ Төленген"
-PAYMENT_STATUS_UNPAID = "❌ Төленбеген"
-
 # Күнді форматтау
 def format_date_display(date_str):
     date_obj = datetime.strptime(date_str, "%Y-%m-%d")
@@ -754,11 +750,11 @@ async def driver_profile(message: types.Message):
             reply_markup=main_menu_keyboard()
         )
         return
-    status = "✅ Белсенді" if driver[9] else "⏳ Күтілуде"
-    payment = PAYMENT_STATUS_PAID if driver[10] else PAYMENT_STATUS_UNPAID
-
+    
     date_display = format_date_display(driver[6])
-
+    status = "✅ Белсенді" if driver[9] else "⏳ Күтілуде"
+    payment = "✅ Төленген" if driver[10] else "❌ Төленбеген"
+    
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👥 Менің жолаушыларым", callback_data="driver_passengers")],
         [InlineKeyboardButton(text="✏️ Күн/уақыт өзгерту", callback_data="driver_change_datetime")],
@@ -767,7 +763,7 @@ async def driver_profile(message: types.Message):
         [InlineKeyboardButton(text="❌ Тіркеуден шығу", callback_data="driver_unregister")],
         [InlineKeyboardButton(text="🔙 Басты мәзір", callback_data="back_main")]
     ])
-
+    
     await message.answer(
         f"🚗 <b>Жүргізуші профилі</b>\n\n"
         f"👤 Аты-жөні: {driver[1]}\n"
@@ -1098,7 +1094,11 @@ async def back_to_driver_profile(callback: types.CallbackQuery, state: FSMContex
     
     if not driver:
         await callback.message.edit_text("❌ Қате орын алды.")
-    payment = PAYMENT_STATUS_PAID if driver[10] else PAYMENT_STATUS_UNPAID
+        return
+    
+    date_display = format_date_display(driver[6])
+    status = "✅ Белсенді" if driver[9] else "⏳ Күтілуде"
+    payment = "✅ Төленген" if driver[10] else "❌ Төленбеген"
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👥 Менің жолаушыларым", callback_data="driver_passengers")],
@@ -1136,6 +1136,7 @@ def admin_keyboard():
             [InlineKeyboardButton(text="🧍‍♂️ Клиенттер тізімі", callback_data="admin_clients")],
             [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
             [InlineKeyboardButton(text="💰 Төлемдер", callback_data="admin_payments")],
+            [InlineKeyboardButton(text="👑 Админдер", callback_data="admin_list")],
             [InlineKeyboardButton(text="🔙 Басты мәзір", callback_data="back_main")]
         ]
     )
@@ -1154,6 +1155,176 @@ async def admin_panel(message: types.Message):
         reply_markup=admin_keyboard(),
         parse_mode="HTML"
     )
+
+# Админдер тізімі
+@dp.callback_query(F.data == "admin_list")
+async def admin_list_view(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Сізде құқық жоқ", show_alert=True)
+        return
+    
+    conn = sqlite3.connect(DATABASE_FILE)
+    c = conn.cursor()
+    c.execute("SELECT user_id, added_at FROM admins ORDER BY added_at")
+    admins = c.fetchall()
+    conn.close()
+    
+    msg = "👑 <b>Админдер тізімі:</b>\n\n"
+    
+    for i, admin in enumerate(admins, 1):
+        msg += f"{i}. User ID: <code>{admin[0]}</code>\n"
+        if admin[1]:
+            date = datetime.fromisoformat(admin[1]).strftime('%d.%m.%Y')
+            msg += f"   📅 Қосылған: {date}\n"
+        msg += "\n"
+    
+    msg += f"<b>Жалпы:</b> {len(admins)} админ\n\n"
+    msg += "💡 Жаңа админ қосу үшін:\n"
+    msg += "<code>/addadmin USER_ID</code>"
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Артқа", callback_data="admin_back")]
+    ])
+    
+    await callback.message.edit_text(msg, reply_markup=keyboard, parse_mode="HTML")
+    await callback.answer()
+
+# Админ қосу командасы
+@dp.message(Command("addadmin"))
+async def add_admin_command(message: types.Message):
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Сізде админ құқығы жоқ.")
+        return
+    
+    # Командадан User ID алу
+    parts = message.text.split()
+    if len(parts) != 2:
+        await message.answer(
+            "❌ <b>Қате формат!</b>\n\n"
+            "Дұрыс пайдалану:\n"
+            "<code>/addadmin USER_ID</code>\n\n"
+            "Мысалы:\n"
+            "<code>/addadmin 123456789</code>\n\n"
+            "💡 User ID табу үшін:\n"
+            "1. @userinfobot ботына өтіңіз\n"
+            "2. /start жіберіңіз",
+            parse_mode="HTML"
+        )
+        return
+    
+    try:
+        new_admin_id = int(parts[1])
+    except ValueError:
+        await message.answer("❌ User ID тек сандардан тұруы керек!")
+        return
+    
+    conn = sqlite3.connect(DATABASE_FILE)
+    c = conn.cursor()
+    
+    try:
+        c.execute("INSERT INTO admins (user_id) VALUES (?)", (new_admin_id,))
+        conn.commit()
+        
+        await message.answer(
+            f"✅ <b>Жаңа админ қосылды!</b>\n\n"
+            f"👤 User ID: <code>{new_admin_id}</code>\n\n"
+            f"Енді бұл қолданушы /admin командасын пайдалана алады.",
+            parse_mode="HTML"
+        )
+        
+        # Жаңа админге хабарлама жіберу
+        try:
+            await bot.send_message(
+                new_admin_id,
+                "🎉 <b>Сізге админ құқығы берілді!</b>\n\n"
+                "Енді сіз админ панелін пайдалана аласыз:\n"
+                "/admin - Админ панелін ашу\n\n"
+                "Жауапкершілікпен пайдаланыңыз! 🔐",
+                parse_mode="HTML"
+            )
+        except:
+            await message.answer(
+                "⚠️ Жаңа админге хабарлама жібере алмадым.\n"
+                "Ол әлі ботты бастамаған шығар (/start)."
+            )
+            
+    except sqlite3.IntegrityError:
+        await message.answer(
+            f"❌ User ID <code>{new_admin_id}</code> қазірдің өзінде админ!",
+            parse_mode="HTML"
+        )
+    finally:
+        conn.close()
+
+# Админді жою командасы
+@dp.message(Command("removeadmin"))
+async def remove_admin_command(message: types.Message):
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Сізде админ құқығы жоқ.")
+        return
+    
+    parts = message.text.split()
+    if len(parts) != 2:
+        await message.answer(
+            "❌ <b>Қате формат!</b>\n\n"
+            "Дұрыс пайдалану:\n"
+            "<code>/removeadmin USER_ID</code>\n\n"
+            "Мысалы:\n"
+            "<code>/removeadmin 123456789</code>",
+            parse_mode="HTML"
+        )
+        return
+    
+    try:
+        admin_to_remove = int(parts[1])
+    except ValueError:
+        await message.answer("❌ User ID тек сандардан тұруы керек!")
+        return
+    
+    # Өзін жоюға тыйым салу
+    if admin_to_remove == message.from_user.id:
+        await message.answer("❌ Өзіңізді админдер тізімінен жоя алмайсыз!")
+        return
+    
+    conn = sqlite3.connect(DATABASE_FILE)
+    c = conn.cursor()
+    
+    # Тексеру
+    c.execute("SELECT COUNT(*) FROM admins WHERE user_id=?", (admin_to_remove,))
+    exists = c.fetchone()[0]
+    
+    if not exists:
+        await message.answer(
+            f"❌ User ID <code>{admin_to_remove}</code> админ емес!",
+            parse_mode="HTML"
+        )
+        conn.close()
+        return
+    
+    # Жою
+    c.execute("DELETE FROM admins WHERE user_id=?", (admin_to_remove,))
+    conn.commit()
+    conn.close()
+    
+    await message.answer(
+        f"✅ <b>Админ жойылды!</b>\n\n"
+        f"👤 User ID: <code>{admin_to_remove}</code>\n\n"
+        f"Бұл қолданушы енді админ панелін пайдалана алмайды.",
+        parse_mode="HTML"
+    )
+    
+    # Жойылған админге хабарлама
+    try:
+        await bot.send_message(
+            admin_to_remove,
+            "⚠️ <b>Админ құқығыңыз алынып тасталды!</b>\n\n"
+            "Енді сіз админ панелін пайдалана алмайсыз.",
+            parse_mode="HTML"
+        )
+    except:
+        pass
+
+# ==================== СОҢЫ АДМИН ПАНЕЛІ ====================
 
 # Жүргізушілер тізімі
 @dp.callback_query(F.data == "admin_drivers")
@@ -1185,16 +1356,16 @@ async def admin_drivers_list(callback: types.CallbackQuery):
     
     current_direction = None
     for driver in drivers:
+        if driver[4] != current_direction:
+            current_direction = driver[4]
+            msg += f"\n📍 <b>{current_direction}</b>\n\n"
+        
         status = "✅ Белсенді" if driver[8] else "❌ Белсенді емес"
-        payment = PAYMENT_STATUS_PAID if driver[9] else PAYMENT_STATUS_UNPAID
+        payment = "✅ Төленген" if driver[9] else "❌ Төленбеген"
         date_display = format_date_display(driver[5])
         
         msg += f"<b>№{driver[7]}</b> - {driver[1]}\n"
         msg += f"   🚗 {driver[2]} ({driver[3]})\n"
-        msg += f"   📅 {date_display} | 🕐 {driver[6]}\n"
-        msg += f"   📊 Статус: {status}\n"
-        msg += f"   💰 Төлем: {payment}\n"
-        msg += f"   🆔 ID: <code>{driver[0]}</code>\n\n"
         msg += f"   📅 {date_display} | 🕐 {driver[6]}\n"
         msg += f"   📊 Статус: {status}\n"
         msg += f"   💰 Төлем: {payment}\n"
@@ -1391,7 +1562,7 @@ async def approve_payment(callback: types.CallbackQuery):
             "Клиенттер сізге брондай алады.",
             parse_mode="HTML"
         )
-    except Exception:
+    except:
         pass
     
     await callback.answer(f"✅ {driver_name} төлемі расталды!", show_alert=True)
