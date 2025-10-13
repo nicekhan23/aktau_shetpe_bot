@@ -184,34 +184,6 @@ def time_keyboard(selected_date):
     
     return InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
 
-# Орын таңдау (Шетпе аудандары)
-def shetpe_locations_keyboard():
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="Шетпе орталығы", callback_data="loc_shetpe_center")],
-            [InlineKeyboardButton(text="Қызылсай", callback_data="loc_kyzylsay")],
-            [InlineKeyboardButton(text="Қарақия", callback_data="loc_karakiya")],
-            [InlineKeyboardButton(text="Сайын", callback_data="loc_saiyn")],
-            [InlineKeyboardButton(text="Басқа жер", callback_data="loc_other")],
-            [InlineKeyboardButton(text="🔙 Артқа", callback_data="back_datetime")]
-        ]
-    )
-    return keyboard
-
-# Ақтау орындары
-def aktau_locations_keyboard():
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="15 микрорайон", callback_data="loc_15mkr")],
-            [InlineKeyboardButton(text="9 микрорайон", callback_data="loc_9mkr")],
-            [InlineKeyboardButton(text="Автовокзал", callback_data="loc_avtovokzal")],
-            [InlineKeyboardButton(text="Базар", callback_data="loc_bazar")],
-            [InlineKeyboardButton(text="Басқа жер", callback_data="loc_other")],
-            [InlineKeyboardButton(text="🔙 Артқа", callback_data="back_datetime")]
-        ]
-    )
-    return keyboard
-
 # Күнді форматтау
 def format_date_display(date_str):
     date_obj = datetime.strptime(date_str, "%Y-%m-%d")
@@ -357,9 +329,9 @@ async def driver_time_select(callback: types.CallbackQuery, state: FSMContext):
     
     # Жүргізушіні сақтау
     c.execute('''INSERT INTO drivers 
-                 (user_id, full_name, car_number, car_model, total_seats, direction, 
-                  departure_date, departure_time, queue_position)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+             (user_id, full_name, car_number, car_model, total_seats, direction, 
+              departure_date, departure_time, queue_position, is_active, payment_status)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1)''',
               (callback.from_user.id, data['full_name'], data['car_number'], 
                data['car_model'], data['seats'], data['direction'], 
                data['departure_date'], data['departure_time'], queue_pos))
@@ -375,12 +347,11 @@ async def driver_time_select(callback: types.CallbackQuery, state: FSMContext):
         f"💺 Орын саны: {data['seats']}\n"
         f"📍 Бағыт: {data['direction']}\n"
         f"📅 Күні: {date_display}\n"
-        f"🕐 Кету уақыты: {data['departure_time']}\n"
+        f"🕐 Шығу уақыты: {data['departure_time']}\n"
         f"📊 Кезектегі орын: №{queue_pos}\n\n"
-        "⚠️ <b>Назар аударыңыз!</b>\n"
-        "Көлікті белсендіру үшін төлем жасау қажет:\n"
-        "💰 Төлем: 1000 тг немесе 5%\n\n"
-        "Төлем жасау үшін /payment командасын пайдаланыңыз.",
+        "🎉 <b>Көлігіңіз белсенді!</b>\n\n"
+        "Клиенттер енді сізге брондай алады.\n"
+        "Профильді басқару үшін: /driver",
         parse_mode="HTML"
     )
     await callback.answer()
@@ -395,6 +366,73 @@ async def driver_custom_time(callback: types.CallbackQuery, state: FSMContext):
     )
     await callback.answer()
     await state.set_state(DriverRegistration.datetime_select)
+
+# Обработка текстового ввода времени (жүргізуші)
+@dp.message(DriverRegistration.datetime_select)
+async def driver_time_text_input(message: types.Message, state: FSMContext):
+    time_str = message.text.strip()
+    
+    # Валидация формата времени
+    import re
+    if not re.match(r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$', time_str):
+        await message.answer(
+            "❌ Қате формат! Дұрыс форматта енгізіңіз:\n"
+            "Мысалы: 08:30 немесе 14:15\n\n"
+            "Қайта енгізіңіз:"
+        )
+        return
+    
+    # Получаем сохраненную дату
+    data = await state.get_data()
+    
+    if 'departure_date' not in data:
+        await message.answer(
+            "❌ Қате: Күн таңдалмаған. Қайтадан бастаңыз.",
+            reply_markup=main_menu_keyboard()
+        )
+        await state.clear()
+        return
+    
+    await state.update_data(departure_time=time_str)
+    
+    # Кезек позициясын анықтау
+    conn = sqlite3.connect('taxi_bot.db')
+    c = conn.cursor()
+    c.execute("""SELECT MAX(queue_position) FROM drivers 
+                 WHERE direction=? AND departure_date=?""", 
+              (data['direction'], data['departure_date']))
+    max_pos = c.fetchone()[0]
+    queue_pos = (max_pos or 0) + 1
+    
+    # Жүргізушіні сақтау
+    c.execute('''INSERT INTO drivers 
+             (user_id, full_name, car_number, car_model, total_seats, direction, 
+              departure_date, departure_time, queue_position, is_active, payment_status)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1)''',
+              (message.from_user.id, data['full_name'], data['car_number'], 
+               data['car_model'], data['seats'], data['direction'], 
+               data['departure_date'], time_str, queue_pos))
+    conn.commit()
+    conn.close()
+    
+    date_display = format_date_display(data['departure_date'])
+    
+    await message.answer(
+        "✅ <b>Тіркеу сәтті аяқталды!</b>\n\n"
+        f"👤 Аты-жөні: {data['full_name']}\n"
+        f"🚗 Көлік: {data['car_model']} ({data['car_number']})\n"
+        f"💺 Орын саны: {data['seats']}\n"
+        f"📍 Бағыт: {data['direction']}\n"
+        f"📅 Күні: {date_display}\n"
+        f"🕐 Шығу уақыты: {time_str}\n"
+        f"📊 Кезектегі орын: №{queue_pos}\n\n"
+        "🎉 <b>Көлігіңіз белсенді!</b>\n\n"
+        "Клиенттер енді сізге брондай алады.\n"
+        "Профильді басқару үшін: /driver",
+        reply_markup=main_menu_keyboard(),
+        parse_mode="HTML"
+    )
+    await state.clear()
 
 # Клиент брондауы
 @dp.message(F.text == "🧍‍♂️ Клиент ретінде кіру")
@@ -430,80 +468,48 @@ async def client_date_select(callback: types.CallbackQuery, state: FSMContext):
     date_display = format_date_display(date_str)
     data = await state.get_data()
     
-    if data['direction'] == "Шетпе → Ақтау":
-        await callback.message.edit_text(
-            f"✅ Бағыт: {data['direction']}\n"
-            f"✅ Күні: {date_display}\n\n"
-            "Қай жерден мінесіз?",
-            reply_markup=shetpe_locations_keyboard()
-        )
-    else:
-        await callback.message.edit_text(
-            f"✅ Бағыт: {data['direction']}\n"
-            f"✅ Күні: {date_display}\n\n"
-            "Қай жерден мінесіз?",
-            reply_markup=aktau_locations_keyboard()
-        )
+    await callback.message.edit_text(
+        f"✅ Бағыт: {data['direction']}\n"
+        f"✅ Күні: {date_display}\n\n"
+        "📍 Қай жерден мінесіз?\n\n"
+        "Мекенжайды жазыңыз (мысалы: Абай көшесі 123, 45 пәтер):",
+    )
     
     await callback.answer()
     await state.set_state(ClientBooking.pickup_location)
 
-@dp.callback_query(ClientBooking.pickup_location, F.data.startswith("loc_"))
-async def client_pickup(callback: types.CallbackQuery, state: FSMContext):
-    location_map = {
-        "loc_shetpe_center": "Шетпе орталығы",
-        "loc_kyzylsay": "Қызылсай",
-        "loc_karakiya": "Қарақия",
-        "loc_saiyn": "Сайын",
-        "loc_15mkr": "15 микрорайон",
-        "loc_9mkr": "9 микрорайон",
-        "loc_avtovokzal": "Автовокзал",
-        "loc_bazar": "Базар",
-        "loc_other": "Басқа жер"
-    }
+@dp.message(ClientBooking.pickup_location)
+async def client_pickup(message: types.Message, state: FSMContext):
+    pickup_address = message.text.strip()
     
-    pickup = location_map.get(callback.data, "Белгісіз")
-    await state.update_data(pickup_location=pickup)
+    if len(pickup_address) < 3:
+        await message.answer("❌ Мекенжай тым қысқа! Толығырақ жазыңыз.")
+        return
     
+    await state.update_data(pickup_location=pickup_address)
     data = await state.get_data()
     
-    if data['direction'] == "Шетпе → Ақтау":
-        await callback.message.edit_text(
-            f"✅ Мінетін жер: {pickup}\n\n"
-            "Қай жерде түсесіз?",
-            reply_markup=aktau_locations_keyboard()
-        )
-    else:
-        await callback.message.edit_text(
-            f"✅ Мінетін жер: {pickup}\n\n"
-            "Қай жерде түсесіз?",
-            reply_markup=shetpe_locations_keyboard()
-        )
+    await message.answer(
+        f"✅ Мінетін жер: {pickup_address}\n\n"
+        "📍 Қай жерде түсесіз?\n\n"
+        "Мекенжайды жазыңыз:"
+    )
     
-    await callback.answer()
     await state.set_state(ClientBooking.dropoff_location)
 
-@dp.callback_query(ClientBooking.dropoff_location, F.data.startswith("loc_"))
-async def client_dropoff(callback: types.CallbackQuery, state: FSMContext):
-    location_map = {
-        "loc_shetpe_center": "Шетпе орталығы",
-        "loc_kyzylsay": "Қызылсай",
-        "loc_karakiya": "Қарақия",
-        "loc_saiyn": "Сайын",
-        "loc_15mkr": "15 микрорайон",
-        "loc_9mkr": "9 микрорайон",
-        "loc_avtovokzal": "Автовокзал",
-        "loc_bazar": "Базар",
-        "loc_other": "Басқа жер"
-    }
+@dp.message(ClientBooking.dropoff_location)
+async def client_dropoff(message: types.Message, state: FSMContext):
+    dropoff_address = message.text.strip()
     
-    dropoff = location_map.get(callback.data, "Белгісіз")
-    await state.update_data(dropoff_location=dropoff)
+    if len(dropoff_address) < 3:
+        await message.answer("❌ Мекенжай тым қысқа! Толығырақ жазыңыз.")
+        return
     
+    await state.update_data(dropoff_location=dropoff_address)
     data = await state.get_data()
     date_display = format_date_display(data['departure_date'])
     
-    # Қолжетімді көліктерді көрсету
+    # Қолжетімді көліктерді көрсету (БҰЛ КОД ҚАЛАДЫ БЕЗ ИЗМЕНЕНИЙ)
     conn = sqlite3.connect('taxi_bot.db')
     c = conn.cursor()
     c.execute('''SELECT d.user_id, d.full_name, d.car_model, d.car_number, 
@@ -521,19 +527,17 @@ async def client_dropoff(callback: types.CallbackQuery, state: FSMContext):
     conn.close()
     
     if not drivers:
-        await callback.message.edit_text(
+        await message.answer(
             f"❌ {date_display} күні қолжетімді көліктер жоқ.\n\n"
             "Басқа күн таңдап көріңіз немесе кейінірек қайталаңыз.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 Басты мәзірге", callback_data="back_main")]
-            ])
+            reply_markup=main_menu_keyboard()
         )
         await state.clear()
         return
     
     message_text = f"📅 Күні: {date_display}\n"
     message_text += f"✅ Мінетін жер: {data['pickup_location']}\n"
-    message_text += f"✅ Түсетін жер: {dropoff}\n\n"
+    message_text += f"✅ Түсетін жер: {dropoff_address}\n\n"
     message_text += "🚗 <b>Бос көліктер:</b>\n\n"
     
     keyboard_buttons = []
@@ -544,21 +548,20 @@ async def client_dropoff(callback: types.CallbackQuery, state: FSMContext):
             message_text += f"   👤 {driver[1]}\n"
             message_text += f"   🚗 {driver[2]} ({driver[3]})\n"
             message_text += f"   💺 Бос орын: {available_seats}/{driver[4]}\n"
-            message_text += f"   🕐 Кету: {driver[5]}\n\n"
+            message_text += f"   🕐 Шығу: {driver[5]}\n\n"
             
             keyboard_buttons.append([InlineKeyboardButton(
                 text=f"Орнымды №{driver[6]} көлікте брондау ({driver[5]})",
                 callback_data=f"book_{driver[0]}"
             )])
     
-    keyboard_buttons.append([InlineKeyboardButton(text="🔙 Артқа", callback_data="back_datetime")])
+    keyboard_buttons.append([InlineKeyboardButton(text="🔙 Басты мәзірге", callback_data="back_main")])
     
-    await callback.message.edit_text(
+    await message.answer(
         message_text,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_buttons),
         parse_mode="HTML"
     )
-    await callback.answer()
     await state.set_state(ClientBooking.select_car)
 
 @dp.callback_query(ClientBooking.select_car, F.data.startswith("book_"))
@@ -628,7 +631,7 @@ async def client_book_car(callback: types.CallbackQuery, state: FSMContext):
             f"✅ <b>Көлік толды!</b>\n\n"
             f"📅 Күні: {date_display}\n"
             f"💺 {total_seats} адам тіркелді.\n"
-            f"🕐 Кету уақыты: {driver[3]}\n\n"
+            f"🕐 Шығу уақыты: {driver[3]}\n\n"
             "Сіз жолға шыға аласыз! 🚗",
             parse_mode="HTML"
         )
@@ -711,7 +714,7 @@ async def my_bookings(message: types.Message):
         message_text += "👤 <b>Клиент ретінде:</b>\n\n"
         for booking in bookings:
             date_display = format_date_display(booking[5])
-            message_text += f"🎫 Бронд #{booking[0]}\n"
+            message_text += f"🎫 Брон #{booking[0]}\n"
             message_text += f"🚗 Жүргізуші: {booking[1]}\n"
             message_text += f"🚙 Көлік: {booking[2]} ({booking[3]})\n"
             message_text += f"📍 {booking[4]}\n"
@@ -737,48 +740,99 @@ async def my_bookings(message: types.Message):
 # Жүргізуші профилі
 @dp.message(Command("driver"))
 async def driver_profile(message: types.Message):
-    conn = sqlite3.connect('taxi_bot.db')
-    c = conn.cursor()
-    c.execute("SELECT * FROM drivers WHERE user_id=?", (message.from_user.id,))
-    driver = c.fetchone()
-    conn.close()
-    
-    if not driver:
+    try:
+        conn = sqlite3.connect('taxi_bot.db')
+        c = conn.cursor()
+        c.execute("SELECT * FROM drivers WHERE user_id=?", (message.from_user.id,))
+        driver = c.fetchone()
+        conn.close()
+        
+        if not driver:
+            await message.answer(
+                "❌ Сіз жүргізуші ретінде тіркелмегенсіз.\n\n"
+                "Тіркелу үшін '🚗 Жүргізуші ретінде кіру' батырмасын басыңыз.",
+                reply_markup=main_menu_keyboard()
+            )
+            return
+        
+        # Проверяем количество столбцов
+        # Старая версия: 11 столбцов (без departure_date)
+        # Новая версия: 12 столбцов (с departure_date)
+        
+        if len(driver) == 11:
+            # Старая структура БЕЗ departure_date
+            user_id = driver[0]
+            full_name = driver[1]
+            car_number = driver[2]
+            car_model = driver[3]
+            total_seats = driver[4]
+            direction = driver[5]
+            # departure_date НЕТ - пропускаем
+            departure_time = driver[6]
+            queue_position = driver[7]
+            is_active = driver[8]
+            payment_status = driver[9]
+            
+            date_display = "Күн белгіленбеген"
+            
+        elif len(driver) >= 12:
+            # Новая структура С departure_date
+            user_id = driver[0]
+            full_name = driver[1]
+            car_number = driver[2]
+            car_model = driver[3]
+            total_seats = driver[4]
+            direction = driver[5]
+            departure_date = driver[6]
+            departure_time = driver[7]
+            queue_position = driver[8]
+            is_active = driver[9]
+            payment_status = driver[10]
+            
+            date_display = format_date_display(departure_date)
+        else:
+            # Неизвестная структура
+            await message.answer(
+                "❌ Қате: Дерекқор құрылымы дұрыс емес.\n\n"
+                "setup.py арқылы миграция жасаңыз:\n"
+                "python setup.py → Опция 2"
+            )
+            return
+        
+        status = "✅ Белсенді" if is_active else "⏳ Күтілуде"
+        payment = "🎉 Бета (тегін)" #"✅ Төленген" if payment_status else "❌ Төленбеген"
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="👥 Менің жолаушыларым", callback_data="driver_passengers")],
+            [InlineKeyboardButton(text="✏️ Күн/уақыт өзгерту", callback_data="driver_change_datetime")],
+            [InlineKeyboardButton(text="🔄 Бағыт өзгерту", callback_data="driver_change_direction")],
+            [InlineKeyboardButton(text="🚗 Көлік мәліметтерін өзгерту", callback_data="driver_change_car")],
+            [InlineKeyboardButton(text="❌ Тіркеуден шығу", callback_data="driver_unregister")],
+            [InlineKeyboardButton(text="🔙 Басты мәзір", callback_data="back_main")]
+        ])
+        
         await message.answer(
-            "❌ Сіз жүргізуші ретінде тіркелмегенсіз.\n\n"
-            "Тіркелу үшін '🚗 Жүргізуші ретінде кіру' батырмасын басыңыз.",
-            reply_markup=main_menu_keyboard()
+            f"🚗 <b>Жүргізуші профилі</b>\n\n"
+            f"👤 Аты-жөні: {full_name}\n"
+            f"🚙 Көлік: {car_model} ({car_number})\n"
+            f"💺 Орын саны: {total_seats}\n"
+            f"📍 Бағыт: {direction}\n"
+            f"📅 Күні: {date_display}\n"
+            f"🕐 Шығу уақыты: {departure_time}\n"
+            f"📊 Кезектегі орын: №{queue_position}\n"
+            f"📊 Статус: {status}\n"
+            # f"💰 Төлем: {payment}\n\n"
+            "Басқару опцияларын таңдаңыз:",
+            reply_markup=keyboard,
+            parse_mode="HTML"
         )
-        return
-    
-    date_display = format_date_display(driver[6])
-    status = "✅ Белсенді" if driver[9] else "⏳ Күтілуде"
-    payment = "✅ Төленген" if driver[10] else "❌ Төленбеген"
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👥 Менің жолаушыларым", callback_data="driver_passengers")],
-        [InlineKeyboardButton(text="✏️ Күн/уақыт өзгерту", callback_data="driver_change_datetime")],
-        [InlineKeyboardButton(text="🔄 Бағыт өзгерту", callback_data="driver_change_direction")],
-        [InlineKeyboardButton(text="🚗 Көлік мәліметтерін өзгерту", callback_data="driver_change_car")],
-        [InlineKeyboardButton(text="❌ Тіркеуден шығу", callback_data="driver_unregister")],
-        [InlineKeyboardButton(text="🔙 Басты мәзір", callback_data="back_main")]
-    ])
-    
-    await message.answer(
-        f"🚗 <b>Жүргізуші профилі</b>\n\n"
-        f"👤 Аты-жөні: {driver[1]}\n"
-        f"🚙 Көлік: {driver[3]} ({driver[2]})\n"
-        f"💺 Орын саны: {driver[4]}\n"
-        f"📍 Бағыт: {driver[5]}\n"
-        f"📅 Күні: {date_display}\n"
-        f"🕐 Шығу уақыты: {driver[7]}\n"
-        f"📊 Кезектегі орын: №{driver[8]}\n"
-        f"📊 Статус: {status}\n"
-        f"💰 Төлем: {payment}\n\n"
-        "Басқару опцияларын таңдаңыз:",
-        reply_markup=keyboard,
-        parse_mode="HTML"
-    )
+        
+    except Exception as e:
+        await message.answer(
+            f"❌ Қате:\n{str(e)}\n\n"
+            "Қолдау қызметіне хабарласыңыз: @support"
+        )
+        print(f"Error in driver_profile: {e}")
 
 # Жүргізушінің жолаушыларын көрсету
 @dp.callback_query(F.data == "driver_passengers")
@@ -1098,7 +1152,7 @@ async def back_to_driver_profile(callback: types.CallbackQuery, state: FSMContex
     
     date_display = format_date_display(driver[6])
     status = "✅ Белсенді" if driver[9] else "⏳ Күтілуде"
-    payment = "✅ Төленген" if driver[10] else "❌ Төленбеген"
+    payment = "🎉 Бета (тегін)" # "✅ Төленген" if driver[10] else "❌ Төленбеген"
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👥 Менің жолаушыларым", callback_data="driver_passengers")],
@@ -1119,7 +1173,7 @@ async def back_to_driver_profile(callback: types.CallbackQuery, state: FSMContex
         f"🕐 Шығу уақыты: {driver[7]}\n"
         f"📊 Кезектегі орын: №{driver[8]}\n"
         f"📊 Статус: {status}\n"
-        f"💰 Төлем: {payment}\n\n"
+        # f"💰 Төлем: {payment}\n\n"
         "Басқару опцияларын таңдаңыз:",
         reply_markup=keyboard,
         parse_mode="HTML"
@@ -1361,14 +1415,14 @@ async def admin_drivers_list(callback: types.CallbackQuery):
             msg += f"\n📍 <b>{current_direction}</b>\n\n"
         
         status = "✅ Белсенді" if driver[8] else "❌ Белсенді емес"
-        payment = "✅ Төленген" if driver[9] else "❌ Төленбеген"
+        payment = "🎉 Бета (тегін)" # "✅ Төленген" if driver[9] else "❌ Төленбеген"
         date_display = format_date_display(driver[5])
         
         msg += f"<b>№{driver[7]}</b> - {driver[1]}\n"
         msg += f"   🚗 {driver[2]} ({driver[3]})\n"
         msg += f"   📅 {date_display} | 🕐 {driver[6]}\n"
         msg += f"   📊 Статус: {status}\n"
-        msg += f"   💰 Төлем: {payment}\n"
+        # msg += f"   💰 Төлем: {payment}\n"
         msg += f"   🆔 ID: <code>{driver[0]}</code>\n\n"
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -1441,8 +1495,8 @@ async def admin_statistics(callback: types.CallbackQuery):
     c.execute("SELECT COUNT(*) FROM bookings WHERE status='active'")
     active_bookings = c.fetchone()[0]
     
-    c.execute("SELECT COUNT(*) FROM drivers WHERE payment_status=1")
-    paid_drivers = c.fetchone()[0]
+    # c.execute("SELECT COUNT(*) FROM drivers WHERE payment_status=1")
+    # paid_drivers = c.fetchone()[0]
     
     # Бағыттар бойынша
     c.execute('''SELECT direction, COUNT(*) 
@@ -1463,7 +1517,7 @@ async def admin_statistics(callback: types.CallbackQuery):
     msg += f"👥 <b>Жүргізушілер:</b>\n"
     msg += f"   • Жалпы: {total_drivers}\n"
     msg += f"   • Белсенді: {active_drivers}\n"
-    msg += f"   • Төлем жасаған: {paid_drivers}\n\n"
+    # msg += f"   • Төлем жасаған: {paid_drivers}\n\n"
     
     msg += f"🧍‍♂️ <b>Клиенттер:</b> {total_clients}\n\n"
     
