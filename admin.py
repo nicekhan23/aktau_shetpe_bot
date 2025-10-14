@@ -2,18 +2,83 @@ import sqlite3
 from aiogram import types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from datetime import datetime
+
+# ==================== ҚОСЫМША ФУНКЦИЯЛАР ====================
 
 # Админдерді тексеру
-def is_admin(user_id: int) -> bool:
-    conn = sqlite3.connect('taxi_bot.db')
+def is_admin(user_id: int, db_file: str = 'taxi_bot.db') -> bool:
+    """Қолданушының админ екенін тексереді"""
+    conn = sqlite3.connect(db_file)
     c = conn.cursor()
     c.execute("SELECT user_id FROM admins WHERE user_id=?", (user_id,))
     result = c.fetchone()
     conn.close()
     return result is not None
 
+# Админ қосу (консоль/скрипт үшін)
+def add_admin(user_id: int, db_file: str = 'taxi_bot.db'):
+    """Жаңа админ қосу (консольдан немесе скрипттен)"""
+    conn = sqlite3.connect(db_file)
+    c = conn.cursor()
+    try:
+        c.execute("INSERT INTO admins (user_id) VALUES (?)", (user_id,))
+        conn.commit()
+        print(f"✅ Админ қосылды: {user_id}")
+        return True
+    except sqlite3.IntegrityError:
+        print(f"❌ Бұл қолданушы қазірдің өзінде админ: {user_id}")
+        return False
+    finally:
+        conn.close()
+
+# Админді жою (консоль/скрипт үшін)
+def remove_admin(user_id: int, db_file: str = 'taxi_bot.db'):
+    """Админді жою (консольдан немесе скрипттен)"""
+    conn = sqlite3.connect(db_file)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM admins WHERE user_id=?", (user_id,))
+    exists = c.fetchone()[0]
+    
+    if not exists:
+        print(f"❌ User ID {user_id} админ емес!")
+        conn.close()
+        return False
+    
+    c.execute("DELETE FROM admins WHERE user_id=?", (user_id,))
+    conn.commit()
+    conn.close()
+    print(f"✅ Админ жойылды: {user_id}")
+    return True
+
+# Барлық админдерді көрсету (консоль/скрипт үшін)
+def list_admins(db_file: str = 'taxi_bot.db'):
+    """Барлық админдерді көрсетеді"""
+    conn = sqlite3.connect(db_file)
+    c = conn.cursor()
+    c.execute("SELECT user_id, added_at FROM admins ORDER BY added_at")
+    admins = c.fetchall()
+    conn.close()
+    
+    if not admins:
+        print("❌ Админдер жоқ!")
+        return []
+    
+    print("\n👑 Админдер тізімі:")
+    print("=" * 50)
+    for i, admin in enumerate(admins, 1):
+        date_str = admin[1] if admin[1] else "белгісіз"
+        print(f"{i}. User ID: {admin[0]} | Қосылған: {date_str}")
+    print("=" * 50)
+    print(f"Жалпы: {len(admins)} админ\n")
+    
+    return admins
+
+# ==================== КЛАВИАТУРАЛАР ====================
+
 # Админ мәзірі
 def admin_keyboard():
+    """Негізгі админ панелі клавиатурасы"""
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="👥 Жүргізушілер тізімі", callback_data="admin_drivers")],
@@ -21,13 +86,34 @@ def admin_keyboard():
             [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
             [InlineKeyboardButton(text="💰 Төлемдер", callback_data="admin_payments")],
             [InlineKeyboardButton(text="🔧 Кезек басқару", callback_data="admin_queue")],
+            [InlineKeyboardButton(text="👑 Админдер", callback_data="admin_list")],
             [InlineKeyboardButton(text="🔙 Басты мәзір", callback_data="back_main")]
         ]
     )
     return keyboard
 
+# Күнді форматтау
+def format_date_display(date_str):
+    """Күнді адам оқитын форматқа түрлендіреді"""
+    from datetime import datetime, timedelta
+    date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+    today = datetime.now().date()
+    tomorrow = today + timedelta(days=1)
+    
+    if date_obj.date() == today:
+        return f"Бүгін ({date_obj.strftime('%d.%m.%Y')})"
+    elif date_obj.date() == tomorrow:
+        return f"Ертең ({date_obj.strftime('%d.%m.%Y')})"
+    else:
+        weekdays = ["Дүйсенбі", "Сейсенбі", "Сәрсенбі", "Бейсенбі", "Жұма", "Сенбі", "Жексенбі"]
+        weekday = weekdays[date_obj.weekday()]
+        return f"{weekday} ({date_obj.strftime('%d.%m.%Y')})"
+
+# ==================== АДМИН ПАНЕЛІ ХЭНДЛЕРЛЕРІ ====================
+
 # Админ панелін ашу
 async def admin_panel(message: types.Message):
+    """Негізгі админ панелін көрсетеді"""
     if not is_admin(message.from_user.id):
         await message.answer("❌ Сізде админ құқығы жоқ.")
         return
@@ -41,6 +127,7 @@ async def admin_panel(message: types.Message):
 
 # Жүргізушілер тізімі
 async def admin_drivers_list(callback: types.CallbackQuery):
+    """Барлық жүргізушілерді көрсетеді"""
     if not is_admin(callback.from_user.id):
         await callback.answer("❌ Сізде құқық жоқ", show_alert=True)
         return
@@ -48,9 +135,10 @@ async def admin_drivers_list(callback: types.CallbackQuery):
     conn = sqlite3.connect('taxi_bot.db')
     c = conn.cursor()
     c.execute('''SELECT user_id, full_name, car_model, car_number, 
-                        direction, queue_position, is_active, payment_status
+                        direction, departure_date, departure_time, queue_position, 
+                        is_active, payment_status
                  FROM drivers
-                 ORDER BY direction, queue_position''')
+                 ORDER BY direction, departure_date, queue_position''')
     drivers = c.fetchall()
     conn.close()
     
@@ -71,13 +159,14 @@ async def admin_drivers_list(callback: types.CallbackQuery):
             current_direction = driver[4]
             msg += f"\n📍 <b>{current_direction}</b>\n\n"
         
-        status = "✅ Белсенді" if driver[6] else "❌ Белсенді емес"
-        payment = "✅ Төленген" if driver[7] else "❌ Төленбеген"
+        status = "✅ Белсенді" if driver[8] else "❌ Белсенді емес"
+        payment = "🎉 Бета" if driver[9] else "❌ Төленбеген"
+        date_display = format_date_display(driver[5])
         
-        msg += f"<b>№{driver[5]}</b> - {driver[1]}\n"
+        msg += f"<b>№{driver[7]}</b> - {driver[1]}\n"
         msg += f"   🚗 {driver[2]} ({driver[3]})\n"
-        msg += f"   📊 Статус: {status}\n"
-        msg += f"   💰 Төлем: {payment}\n"
+        msg += f"   📅 {date_display} | 🕐 {driver[6]}\n"
+        msg += f"   📊 {status} | 💰 {payment}\n"
         msg += f"   🆔 ID: <code>{driver[0]}</code>\n\n"
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -89,6 +178,7 @@ async def admin_drivers_list(callback: types.CallbackQuery):
 
 # Клиенттер тізімі
 async def admin_clients_list(callback: types.CallbackQuery):
+    """Барлық клиенттерді көрсетеді"""
     if not is_admin(callback.from_user.id):
         await callback.answer("❌ Сізде құқық жоқ", show_alert=True)
         return
@@ -128,6 +218,7 @@ async def admin_clients_list(callback: types.CallbackQuery):
 
 # Статистика
 async def admin_statistics(callback: types.CallbackQuery):
+    """Жүйе статистикасын көрсетеді"""
     if not is_admin(callback.from_user.id):
         await callback.answer("❌ Сізде құқық жоқ", show_alert=True)
         return
@@ -193,13 +284,14 @@ async def admin_statistics(callback: types.CallbackQuery):
 
 # Төлемдер
 async def admin_payments(callback: types.CallbackQuery):
+    """Төленбеген жүргізушілерді көрсетеді"""
     if not is_admin(callback.from_user.id):
         await callback.answer("❌ Сізде құқық жоқ", show_alert=True)
         return
     
     conn = sqlite3.connect('taxi_bot.db')
     c = conn.cursor()
-    c.execute('''SELECT user_id, full_name, car_number, payment_status
+    c.execute('''SELECT user_id, full_name, car_number, departure_date, departure_time
                  FROM drivers
                  WHERE payment_status = 0
                  ORDER BY created_at DESC''')
@@ -219,8 +311,10 @@ async def admin_payments(callback: types.CallbackQuery):
     
     keyboard_buttons = []
     for driver in pending_payments:
+        date_display = format_date_display(driver[3])
         msg += f"👤 {driver[1]}\n"
         msg += f"   🚗 {driver[2]}\n"
+        msg += f"   📅 {date_display} | 🕐 {driver[4]}\n"
         msg += f"   🆔 ID: <code>{driver[0]}</code>\n\n"
         
         keyboard_buttons.append([
@@ -241,6 +335,7 @@ async def admin_payments(callback: types.CallbackQuery):
 
 # Төлемді растау
 async def approve_payment(callback: types.CallbackQuery, bot):
+    """Жүргізушінің төлемін растайды"""
     if not is_admin(callback.from_user.id):
         await callback.answer("❌ Сізде құқық жоқ", show_alert=True)
         return
@@ -257,19 +352,23 @@ async def approve_payment(callback: types.CallbackQuery, bot):
     conn.close()
     
     # Жүргізушіге хабарлама
-    await bot.send_message(
-        driver_id,
-        "✅ <b>Төлеміңіз расталды!</b>\n\n"
-        "Көлігіңіз енді белсенді.\n"
-        "Клиенттер сізге брондай алады.",
-        parse_mode="HTML"
-    )
+    try:
+        await bot.send_message(
+            driver_id,
+            "✅ <b>Төлеміңіз расталды!</b>\n\n"
+            "Көлігіңіз енді белсенді.\n"
+            "Клиенттер сізге брондай алады.",
+            parse_mode="HTML"
+        )
+    except:
+        pass
     
     await callback.answer(f"✅ {driver_name} төлемі расталды!", show_alert=True)
     await admin_payments(callback)
 
 # Кезек басқару
 async def admin_queue_management(callback: types.CallbackQuery):
+    """Кезекті басқару интерфейсі"""
     if not is_admin(callback.from_user.id):
         await callback.answer("❌ Сізде құқық жоқ", show_alert=True)
         return
@@ -320,6 +419,7 @@ async def admin_queue_management(callback: types.CallbackQuery):
 
 # Кезекті жоғары жылжыту
 async def queue_move_up(callback: types.CallbackQuery):
+    """Жүргізушіді кезекте жоғары көтереді"""
     if not is_admin(callback.from_user.id):
         await callback.answer("❌ Сізде құқық жоқ", show_alert=True)
         return
@@ -329,7 +429,6 @@ async def queue_move_up(callback: types.CallbackQuery):
     conn = sqlite3.connect('taxi_bot.db')
     c = conn.cursor()
     
-    # Ағымдағы позиция
     c.execute("SELECT queue_position, direction FROM drivers WHERE user_id=?", (driver_id,))
     current = c.fetchone()
     
@@ -338,7 +437,6 @@ async def queue_move_up(callback: types.CallbackQuery):
         conn.close()
         return
     
-    # Алдыңғы көлікпен орын ауыстыру
     c.execute('''UPDATE drivers SET queue_position = queue_position + 1 
                  WHERE direction=? AND queue_position=?''', 
               (current[1], current[0] - 1))
@@ -354,6 +452,7 @@ async def queue_move_up(callback: types.CallbackQuery):
 
 # Кезекті төмен жылжыту
 async def queue_move_down(callback: types.CallbackQuery):
+    """Жүргізушіді кезекте төмен түсіреді"""
     if not is_admin(callback.from_user.id):
         await callback.answer("❌ Сізде құқық жоқ", show_alert=True)
         return
@@ -363,11 +462,9 @@ async def queue_move_down(callback: types.CallbackQuery):
     conn = sqlite3.connect('taxi_bot.db')
     c = conn.cursor()
     
-    # Ағымдағы позиция
     c.execute("SELECT queue_position, direction FROM drivers WHERE user_id=?", (driver_id,))
     current = c.fetchone()
     
-    # Соңғы позицияны тексеру
     c.execute("SELECT MAX(queue_position) FROM drivers WHERE direction=?", (current[1],))
     max_pos = c.fetchone()[0]
     
@@ -376,7 +473,6 @@ async def queue_move_down(callback: types.CallbackQuery):
         conn.close()
         return
     
-    # Келесі көлікпен орын ауыстыру
     c.execute('''UPDATE drivers SET queue_position = queue_position - 1 
                  WHERE direction=? AND queue_position=?''', 
               (current[1], current[0] + 1))
@@ -390,8 +486,46 @@ async def queue_move_down(callback: types.CallbackQuery):
     await callback.answer("✅ Кезек төмен жылжыды!")
     await admin_queue_management(callback)
 
+# Админдер тізімі
+async def admin_list_view(callback: types.CallbackQuery):
+    """Барлық админдерді көрсетеді"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Сізде құқық жоқ", show_alert=True)
+        return
+    
+    conn = sqlite3.connect('taxi_bot.db')
+    c = conn.cursor()
+    c.execute("SELECT user_id, added_at FROM admins ORDER BY added_at")
+    admins = c.fetchall()
+    conn.close()
+    
+    msg = "👑 <b>Админдер тізімі:</b>\n\n"
+    
+    for i, admin in enumerate(admins, 1):
+        msg += f"{i}. User ID: <code>{admin[0]}</code>\n"
+        if admin[1]:
+            try:
+                date = datetime.fromisoformat(admin[1]).strftime('%d.%m.%Y')
+                msg += f"   📅 Қосылған: {date}\n"
+            except:
+                pass
+        msg += "\n"
+    
+    msg += f"<b>Жалпы:</b> {len(admins)} админ\n\n"
+    msg += "💡 <b>Админдерді басқару:</b>\n"
+    msg += "• Қосу: <code>/addadmin USER_ID</code>\n"
+    msg += "• Жою: <code>/removeadmin USER_ID</code>"
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Артқа", callback_data="admin_back")]
+    ])
+    
+    await callback.message.edit_text(msg, reply_markup=keyboard, parse_mode="HTML")
+    await callback.answer()
+
 # Админ панеліне қайту
 async def admin_back(callback: types.CallbackQuery):
+    """Админ панелінің басты бетіне қайтады"""
     if not is_admin(callback.from_user.id):
         await callback.answer("❌ Сізде құқық жоқ", show_alert=True)
         return
@@ -404,15 +538,57 @@ async def admin_back(callback: types.CallbackQuery):
     )
     await callback.answer()
 
-# Админ қосу функциясы (бұл функцияны тек қолмен шақыру керек)
-def add_admin(user_id: int):
-    conn = sqlite3.connect('taxi_bot.db')
-    c = conn.cursor()
-    try:
-        c.execute("INSERT INTO admins (user_id) VALUES (?)", (user_id,))
-        conn.commit()
-        print(f"✅ Админ қосылды: {user_id}")
-    except sqlite3.IntegrityError:
-        print(f"❌ Бұл қолданушы қазірдің өзінде админ: {user_id}")
-    finally:
-        conn.close()
+# ==================== КОНСОЛЬ РЕЖИМІ ====================
+
+if __name__ == "__main__":
+    """Консольдан тікелей скрипт ретінде іске қосу"""
+    import sys
+    
+    print("\n" + "="*50)
+    print("🔐 АДМИНДЕРДІ БАСҚАРУ")
+    print("="*50 + "\n")
+    
+    if len(sys.argv) < 2:
+        print("Пайдалану:")
+        print("  python admin.py add USER_ID      - Админ қосу")
+        print("  python admin.py remove USER_ID   - Админді жою")
+        print("  python admin.py list             - Барлық админдерді көрсету")
+        print("\nМысал:")
+        print("  python admin.py add 123456789")
+        sys.exit(0)
+    
+    command = sys.argv[1].lower()
+    
+    if command == "add":
+        if len(sys.argv) < 3:
+            print("❌ Қате: User ID көрсетілмеген!")
+            print("Мысал: python admin.py add 123456789")
+            sys.exit(1)
+        
+        try:
+            user_id = int(sys.argv[2])
+            add_admin(user_id)
+        except ValueError:
+            print("❌ Қате: User ID сан болуы керек!")
+            sys.exit(1)
+    
+    elif command == "remove":
+        if len(sys.argv) < 3:
+            print("❌ Қате: User ID көрсетілмеген!")
+            print("Мысал: python admin.py remove 123456789")
+            sys.exit(1)
+        
+        try:
+            user_id = int(sys.argv[2])
+            remove_admin(user_id)
+        except ValueError:
+            print("❌ Қате: User ID сан болуы керек!")
+            sys.exit(1)
+    
+    elif command == "list":
+        list_admins()
+    
+    else:
+        print(f"❌ Белгісіз команда: {command}")
+        print("Қолжетімді командалар: add, remove, list")
+        sys.exit(1)
