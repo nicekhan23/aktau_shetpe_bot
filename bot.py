@@ -1,5 +1,6 @@
 import asyncio
 import sqlite3
+import aiosqlite
 import os
 import logging
 from datetime import datetime
@@ -10,6 +11,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from contextlib import asynccontextmanager
 import random
 import string
 
@@ -17,11 +19,25 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 DATABASE_FILE = os.getenv("DATABASE_FILE", "taxi_bot.db")
+DB_TIMEOUT = 10.0
 SMS_API_KEY = os.getenv("SMS_API_KEY", "")
 
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
+
+@asynccontextmanager
+async def get_db():
+    """Async context manager for database connections"""
+    async with aiosqlite.connect(DATABASE_FILE, timeout=30.0) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA busy_timeout=30000")  # 30 second timeout
+        try:
+            yield db
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
 # ==================== ЛОГИРОВАНИЕ ====================
 
@@ -219,70 +235,86 @@ class DBMigration:
         DBMigration.set_db_version(4)
         logger.info("Миграция v4 завершена")
 
-def init_db():
+async def init_db():
+    """Initialize database with WAL mode"""
+    async with aiosqlite.connect(DATABASE_FILE) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA busy_timeout=30000")
+        await db.commit()
+    
+    # Run migrations (keep your existing DBMigration class)
     DBMigration.migrate()
 
 # ==================== УТИЛИТЫ ====================
 
-def is_admin(user_id: int) -> bool:
-    conn = sqlite3.connect(DATABASE_FILE)
-    c = conn.cursor()
-    c.execute("SELECT user_id FROM admins WHERE user_id=?", (user_id,))
-    result = c.fetchone()
-    conn.close()
-    return result is not None
+async def is_admin(user_id: int) -> bool:
+    """Check if user is admin - ASYNC VERSION"""
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT user_id FROM admins WHERE user_id=?", 
+            (user_id,)
+        ) as cursor:
+            result = await cursor.fetchone()
+            return result is not None
 
-def save_log_action(user_id: int, action: str, details: str = ""):
-    conn = sqlite3.connect(DATABASE_FILE)
-    c = conn.cursor()
-    c.execute('''INSERT INTO actions_log (user_id, action, details) 
-                 VALUES (?, ?, ?)''', (user_id, action, details))
-    conn.commit()
-    conn.close()
+async def save_log_action(user_id: int, action: str, details: str = ""):
+    """Save action log - ASYNC VERSION"""
+    async with get_db() as db:
+        await db.execute('''INSERT INTO actions_log (user_id, action, details) 
+                           VALUES (?, ?, ?)''', (user_id, action, details))
     log_action(user_id, action, details)
 
-def get_driver_available_seats(driver_id: int) -> tuple:
-    """Возвращает (занято мест, всего мест, свободно мест)"""
-    conn = sqlite3.connect(DATABASE_FILE)
-    c = conn.cursor()
-    
-    # Проверяем наличие колонок
-    c.execute("PRAGMA table_info(drivers)")
-    columns = [col[1] for col in c.fetchall()]
-    
-    if 'occupied_seats' in columns and 'total_seats' in columns:
-        c.execute("SELECT total_seats, occupied_seats FROM drivers WHERE user_id=?", (driver_id,))
-        result = c.fetchone()
-        conn.close()
-        
-        if not result:
-            return (0, 0, 0)
-        
-        total = result[0]
-        occupied = result[1] or 0
-        available = total - occupied
-        return (occupied, total, available)
-    else:
-        # Старая версия БД - возвращаем только total_seats
-        c.execute("SELECT total_seats FROM drivers WHERE user_id=?", (driver_id,))
-        result = c.fetchone()
-        conn.close()
-        
-        if not result:
-            return (0, 0, 0)
-        
-        total = result[0]
-        return (0, total, total)  # Считаем что все места свободны
 
-def update_driver_seats(driver_id: int, add_passengers: int):
-    """Обновляет количество занятых мест у водителя"""
-    conn = sqlite3.connect(DATABASE_FILE)
-    c = conn.cursor()
-    c.execute('''UPDATE drivers 
-                 SET occupied_seats = occupied_seats + ? 
-                 WHERE user_id=?''', (add_passengers, driver_id))
-    conn.commit()
-    conn.close()
+def save_log_action(user_id: int, action: str, details: str = ""):
+    with get_db() as conn:
+        c = conn.cursor()
+        c.execute('''INSERT INTO actions_log (user_id, action, details) 
+                     VALUES (?, ?, ?)''', (user_id, action, details))
+
+
+async def get_driver_available_seats(driver_id: int) -> tuple:
+    """Возвращает (занято мест, всего мест, свободно мест) - ASYNC VERSION"""
+    async with get_db() as db:
+        # Проверяем наличие колонок
+        async with db.execute("PRAGMA table_info(drivers)") as cursor:
+            columns = [col[1] for col in await cursor.fetchall()]
+        
+        if 'occupied_seats' in columns and 'total_seats' in columns:
+            async with db.execute(
+                "SELECT total_seats, occupied_seats FROM drivers WHERE user_id=?", 
+                (driver_id,)
+            ) as cursor:
+                result = await cursor.fetchone()
+            
+            if not result:
+                return (0, 0, 0)
+            
+            total = result[0]
+            occupied = result[1] or 0
+            available = total - occupied
+            return (occupied, total, available)
+        else:
+            async with db.execute(
+                "SELECT total_seats FROM drivers WHERE user_id=?", 
+                (driver_id,)
+            ) as cursor:
+                result = await cursor.fetchone()
+            
+            if not result:
+                return (0, 0, 0)
+            
+            total = result[0]
+            return (0, total, total)
+
+
+async def update_driver_seats(driver_id: int, add_passengers: int):
+    """Обновляет количество занятых мест у водителя - ASYNC VERSION"""
+    async with get_db() as db:
+        await db.execute('''UPDATE drivers 
+                           SET occupied_seats = occupied_seats + ? 
+                           WHERE user_id=?''', (add_passengers, driver_id))
+
+
 
 def main_menu_keyboard():
     return ReplyKeyboardMarkup(
@@ -642,52 +674,66 @@ async def driver_available_orders(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("accept_client_"))
 async def accept_client(callback: types.CallbackQuery):
-    """Водитель принимает клиента"""
+    """Водитель принимает клиента - FIXED VERSION"""
     client_id = int(callback.data.split("_")[2])
     
-    conn = sqlite3.connect(DATABASE_FILE)
-    c = conn.cursor()
+    async with get_db() as db:
+        # Проверяем доступность клиента
+        async with db.execute(
+            '''SELECT passengers_count, full_name, pickup_location 
+               FROM clients WHERE user_id=? AND status='waiting' ''', 
+            (client_id,)
+        ) as cursor:
+            client = await cursor.fetchone()
+        
+        if not client:
+            await callback.answer("❌ Клиент уже взят другим водителем!", show_alert=True)
+            return
+        
+        occupied, total, available = await get_driver_available_seats(callback.from_user.id)
+        
+        if client[0] > available:
+            await callback.answer(
+                f"❌ Недостаточно мест! Нужно: {client[0]}, есть: {available}", 
+                show_alert=True
+            )
+            return
+        
+        # Принимаем клиента
+        await db.execute(
+            '''UPDATE clients 
+               SET status='accepted', assigned_driver_id=? 
+               WHERE user_id=?''', 
+            (callback.from_user.id, client_id)
+        )
+        
+        # Обновляем занятость мест
+        await update_driver_seats(callback.from_user.id, client[0])
+        
+        # Создаем trip
+        await db.execute(
+            '''INSERT INTO trips (driver_id, client_id, status, passengers_count)
+               VALUES (?, ?, 'accepted', ?)''', 
+            (callback.from_user.id, client_id, client[0])
+        )
+        
+        await db.commit()
+        
+        # Получаем информацию о машине
+        async with db.execute(
+            "SELECT car_model, car_number FROM drivers WHERE user_id=?", 
+            (callback.from_user.id,)
+        ) as cursor:
+            car_info = await cursor.fetchone()
     
-    # Проверяем доступность клиента
-    c.execute('''SELECT passengers_count, full_name, pickup_location 
-                 FROM clients WHERE user_id=? AND status='waiting' ''', (client_id,))
-    client = c.fetchone()
-    
-    if not client:
-        await callback.answer("❌ Клиент уже взят другим водителем!", show_alert=True)
-        conn.close()
-        return
-    
-    occupied, total, available = get_driver_available_seats(callback.from_user.id)
-    
-    if client[0] > available:
-        await callback.answer(f"❌ Недостаточно мест! Нужно: {client[0]}, есть: {available}", show_alert=True)
-        conn.close()
-        return
-    
-    # Принимаем клиента
-    c.execute('''UPDATE clients 
-                 SET status='accepted', assigned_driver_id=? 
-                 WHERE user_id=?''', (callback.from_user.id, client_id))
-    
-    # Обновляем занятость мест
-    update_driver_seats(callback.from_user.id, client[0])
-    
-    # Создаем trip
-    c.execute('''INSERT INTO trips (driver_id, client_id, status, passengers_count)
-                 VALUES (?, ?, 'accepted', ?)''', 
-              (callback.from_user.id, client_id, client[0]))
-    
-    conn.commit()
-    conn.close()
-    
-    save_log_action(callback.from_user.id, "client_accepted", f"Client: {client_id}, Passengers: {client[0]}")
+    await save_log_action(
+        callback.from_user.id, 
+        "client_accepted", 
+        f"Client: {client_id}, Passengers: {client[0]}"
+    )
     
     # Уведомляем клиента
     try:
-        c.execute("SELECT car_model, car_number FROM drivers WHERE user_id=?", (callback.from_user.id,))
-        car_info = c.fetchone()
-        
         await bot.send_message(
             client_id,
             f"✅ <b>Водитель принял ваш заказ!</b>\n\n"
