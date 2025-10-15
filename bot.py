@@ -1,5 +1,4 @@
 import asyncio
-import sqlite3
 import aiosqlite
 import os
 import logging
@@ -28,10 +27,9 @@ dp = Dispatcher(storage=storage)
 
 @asynccontextmanager
 async def get_db():
-    """Async context manager for database connections"""
     async with aiosqlite.connect(DATABASE_FILE, timeout=30.0) as db:
         await db.execute("PRAGMA journal_mode=WAL")
-        await db.execute("PRAGMA busy_timeout=30000")  # 30 second timeout
+        await db.execute("PRAGMA busy_timeout=30000")
         try:
             yield db
             await db.commit()
@@ -39,15 +37,10 @@ async def get_db():
             await db.rollback()
             raise
 
-# ==================== ЛОГИРОВАНИЕ ====================
-
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('taxi_bot.log'),
-        logging.StreamHandler()
-    ]
+    handlers=[logging.FileHandler('taxi_bot.log'), logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
 
@@ -58,8 +51,6 @@ def log_action(user_id: int, action: str, details: str = ""):
         log_msg += f" | {details}"
     logger.info(log_msg)
 
-# ==================== УТИЛИТЫ SMS ====================
-
 def generate_verification_code() -> str:
     return ''.join(random.choices(string.digits, k=4))
 
@@ -67,183 +58,163 @@ async def send_sms(phone: str, message: str) -> bool:
     logger.info(f"SMS отправлено на {phone}: {message}")
     return True
 
-# ==================== БД И МИГРАЦИИ ====================
-
 class DBMigration:
-    
+
     @staticmethod
-    def get_db_version() -> int:
-        conn = sqlite3.connect(DATABASE_FILE)
-        c = conn.cursor()
-        c.execute("PRAGMA user_version")
-        version = c.fetchone()[0]
-        conn.close()
-        return version
-    
+    async def get_db_version() -> int:
+        async with aiosqlite.connect(DATABASE_FILE) as db:
+            async with db.execute("PRAGMA user_version") as cursor:
+                version = (await cursor.fetchone())[0]
+            return version
+
     @staticmethod
-    def set_db_version(version: int):
-        conn = sqlite3.connect(DATABASE_FILE)
-        c = conn.cursor()
-        c.execute(f"PRAGMA user_version = {version}")
-        conn.commit()
-        conn.close()
-    
+    async def set_db_version(version: int):
+        async with aiosqlite.connect(DATABASE_FILE) as db:
+            await db.execute(f"PRAGMA user_version = {version}")
+            await db.commit()
+
     @staticmethod
-    def migrate():
-        current_version = DBMigration.get_db_version()
-        
+    async def migrate():
+        current_version = await DBMigration.get_db_version()
+
         if current_version < 1:
-            DBMigration.migration_v1()
+            await DBMigration.migration_v1()
         if current_version < 2:
-            DBMigration.migration_v2()
+            await DBMigration.migration_v2()
         if current_version < 3:
-            DBMigration.migration_v3()
+            await DBMigration.migration_v3()
         if current_version < 4:
-            DBMigration.migration_v4()
-    
+            await DBMigration.migration_v4()
+
     @staticmethod
-    def migration_v1():
+    async def migration_v1():
         logger.info("Применяю миграцию v1...")
-        conn = sqlite3.connect(DATABASE_FILE)
-        c = conn.cursor()
-        
-        c.execute('''CREATE TABLE IF NOT EXISTS drivers
-                     (user_id INTEGER PRIMARY KEY,
-                      full_name TEXT NOT NULL,
-                      phone TEXT NOT NULL,
-                      car_number TEXT NOT NULL,
-                      car_model TEXT NOT NULL,
-                      total_seats INTEGER NOT NULL,
-                      direction TEXT NOT NULL,
-                      queue_position INTEGER NOT NULL,
-                      is_active INTEGER DEFAULT 0,
-                      is_verified INTEGER DEFAULT 0,
-                      verification_code TEXT,
-                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-        
-        c.execute('''CREATE TABLE IF NOT EXISTS clients
-                     (user_id INTEGER PRIMARY KEY,
-                      full_name TEXT NOT NULL,
-                      phone TEXT NOT NULL,
-                      direction TEXT NOT NULL,
-                      queue_position INTEGER NOT NULL,
-                      passengers_count INTEGER DEFAULT 1,
-                      pickup_location TEXT NOT NULL,
-                      dropoff_location TEXT NOT NULL,
-                      is_verified INTEGER DEFAULT 0,
-                      verification_code TEXT,
-                      status TEXT DEFAULT 'waiting',
-                      assigned_driver_id INTEGER,
-                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-        
-        c.execute('''CREATE TABLE IF NOT EXISTS admins
-                     (user_id INTEGER PRIMARY KEY,
-                      added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-        
-        conn.commit()
-        conn.close()
-        DBMigration.set_db_version(1)
+        async with aiosqlite.connect(DATABASE_FILE) as db:
+            await db.execute('''CREATE TABLE IF NOT EXISTS drivers
+                         (user_id INTEGER PRIMARY KEY,
+                          full_name TEXT NOT NULL,
+                          phone TEXT NOT NULL,
+                          car_number TEXT NOT NULL,
+                          car_model TEXT NOT NULL,
+                          total_seats INTEGER NOT NULL,
+                          direction TEXT NOT NULL,
+                          queue_position INTEGER NOT NULL,
+                          is_active INTEGER DEFAULT 0,
+                          is_verified INTEGER DEFAULT 0,
+                          verification_code TEXT,
+                          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+
+            await db.execute('''CREATE TABLE IF NOT EXISTS clients
+                         (user_id INTEGER PRIMARY KEY,
+                          full_name TEXT NOT NULL,
+                          phone TEXT NOT NULL,
+                          direction TEXT NOT NULL,
+                          queue_position INTEGER NOT NULL,
+                          passengers_count INTEGER DEFAULT 1,
+                          pickup_location TEXT NOT NULL,
+                          dropoff_location TEXT NOT NULL,
+                          is_verified INTEGER DEFAULT 0,
+                          verification_code TEXT,
+                          status TEXT DEFAULT 'waiting',
+                          assigned_driver_id INTEGER,
+                          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+
+            await db.execute('''CREATE TABLE IF NOT EXISTS admins
+                         (user_id INTEGER PRIMARY KEY,
+                          added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+
+            await db.commit()
+        await DBMigration.set_db_version(1)
         logger.info("Миграция v1 завершена")
-    
+
     @staticmethod
-    def migration_v2():
+    async def migration_v2():
         logger.info("Применяю миграцию v2...")
-        conn = sqlite3.connect(DATABASE_FILE)
-        c = conn.cursor()
-        
-        c.execute('''CREATE TABLE IF NOT EXISTS ratings
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                      from_user_id INTEGER,
-                      to_user_id INTEGER,
-                      user_type TEXT,
-                      trip_id INTEGER,
-                      rating INTEGER CHECK(rating >= 1 AND rating <= 5),
-                      review TEXT,
-                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-        
-        c.execute("PRAGMA table_info(drivers)")
-        driver_columns = [column[1] for column in c.fetchall()]
-        if 'avg_rating' not in driver_columns:
-            c.execute("ALTER TABLE drivers ADD COLUMN avg_rating REAL DEFAULT 0")
-        if 'rating_count' not in driver_columns:
-            c.execute("ALTER TABLE drivers ADD COLUMN rating_count INTEGER DEFAULT 0")
-        
-        c.execute("PRAGMA table_info(clients)")
-        client_columns = [column[1] for column in c.fetchall()]
-        if 'avg_rating' not in client_columns:
-            c.execute("ALTER TABLE clients ADD COLUMN avg_rating REAL DEFAULT 0")
-        if 'rating_count' not in client_columns:
-            c.execute("ALTER TABLE clients ADD COLUMN rating_count INTEGER DEFAULT 0")
-        
-        conn.commit()
-        conn.close()
-        DBMigration.set_db_version(2)
+        async with aiosqlite.connect(DATABASE_FILE) as db:
+            await db.execute('''CREATE TABLE IF NOT EXISTS ratings
+                         (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                          from_user_id INTEGER,
+                          to_user_id INTEGER,
+                          user_type TEXT,
+                          trip_id INTEGER,
+                          rating INTEGER CHECK(rating >= 1 AND rating <= 5),
+                          review TEXT,
+                          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+
+            async with db.execute("PRAGMA table_info(drivers)") as cursor:
+                driver_columns = [column[1] for column in await cursor.fetchall()]
+
+            if 'avg_rating' not in driver_columns:
+                await db.execute("ALTER TABLE drivers ADD COLUMN avg_rating REAL DEFAULT 0")
+            if 'rating_count' not in driver_columns:
+                await db.execute("ALTER TABLE drivers ADD COLUMN rating_count INTEGER DEFAULT 0")
+
+            async with db.execute("PRAGMA table_info(clients)") as cursor:
+                client_columns = [column[1] for column in await cursor.fetchall()]
+
+            if 'avg_rating' not in client_columns:
+                await db.execute("ALTER TABLE clients ADD COLUMN avg_rating REAL DEFAULT 0")
+            if 'rating_count' not in client_columns:
+                await db.execute("ALTER TABLE clients ADD COLUMN rating_count INTEGER DEFAULT 0")
+
+            await db.commit()
+        await DBMigration.set_db_version(2)
         logger.info("Миграция v2 завершена")
-    
+
     @staticmethod
-    def migration_v3():
+    async def migration_v3():
         logger.info("Применяю миграцию v3...")
-        conn = sqlite3.connect(DATABASE_FILE)
-        c = conn.cursor()
-        
-        c.execute('''CREATE TABLE IF NOT EXISTS trips
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                      driver_id INTEGER,
-                      client_id INTEGER,
-                      direction TEXT,
-                      pickup_location TEXT,
-                      dropoff_location TEXT,
-                      passengers_count INTEGER,
-                      status TEXT,
-                      driver_arrived_at TIMESTAMP,
-                      trip_started_at TIMESTAMP,
-                      trip_completed_at TIMESTAMP,
-                      cancelled_by TEXT,
-                      cancelled_at TIMESTAMP,
-                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-        
-        c.execute('''CREATE TABLE IF NOT EXISTS actions_log
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                      user_id INTEGER,
-                      action TEXT,
-                      details TEXT,
-                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-        
-        conn.commit()
-        conn.close()
-        DBMigration.set_db_version(3)
+        async with aiosqlite.connect(DATABASE_FILE) as db:
+            await db.execute('''CREATE TABLE IF NOT EXISTS trips
+                         (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                          driver_id INTEGER,
+                          client_id INTEGER,
+                          direction TEXT,
+                          pickup_location TEXT,
+                          dropoff_location TEXT,
+                          passengers_count INTEGER,
+                          status TEXT,
+                          driver_arrived_at TIMESTAMP,
+                          trip_started_at TIMESTAMP,
+                          trip_completed_at TIMESTAMP,
+                          cancelled_by TEXT,
+                          cancelled_at TIMESTAMP,
+                          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+
+            await db.execute('''CREATE TABLE IF NOT EXISTS actions_log
+                         (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                          user_id INTEGER,
+                          action TEXT,
+                          details TEXT,
+                          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+
+            await db.commit()
+        await DBMigration.set_db_version(3)
         logger.info("Миграция v3 завершена")
-    
+
     @staticmethod
-    def migration_v4():
-        """Миграция v4: Добавляем occupied_seats для водителей"""
+    async def migration_v4():
         logger.info("Применяю миграцию v4...")
-        conn = sqlite3.connect(DATABASE_FILE)
-        c = conn.cursor()
-        
-        c.execute("PRAGMA table_info(drivers)")
-        driver_columns = [column[1] for column in c.fetchall()]
-        
-        if 'occupied_seats' not in driver_columns:
-            c.execute("ALTER TABLE drivers ADD COLUMN occupied_seats INTEGER DEFAULT 0")
-        
-        if 'is_on_trip' not in driver_columns:
-            c.execute("ALTER TABLE drivers ADD COLUMN is_on_trip INTEGER DEFAULT 0")
-        
-        conn.commit()
-        conn.close()
-        DBMigration.set_db_version(4)
+        async with aiosqlite.connect(DATABASE_FILE) as db:
+            async with db.execute("PRAGMA table_info(drivers)") as cursor:
+                driver_columns = [column[1] for column in await cursor.fetchall()]
+
+            if 'occupied_seats' not in driver_columns:
+                await db.execute("ALTER TABLE drivers ADD COLUMN occupied_seats INTEGER DEFAULT 0")
+            if 'is_on_trip' not in driver_columns:
+                await db.execute("ALTER TABLE drivers ADD COLUMN is_on_trip INTEGER DEFAULT 0")
+
+            await db.commit()
+        await DBMigration.set_db_version(4)
         logger.info("Миграция v4 завершена")
 
 async def init_db():
-    """Initialize database with WAL mode"""
     async with aiosqlite.connect(DATABASE_FILE) as db:
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA busy_timeout=30000")
         await db.commit()
-    
-    # Run migrations (keep your existing DBMigration class)
-    DBMigration.migrate()
+
+    await DBMigration.migrate()
 
 # ==================== УТИЛИТЫ ====================
 
@@ -302,9 +273,12 @@ async def get_driver_available_seats(driver_id: int) -> tuple:
 async def update_driver_seats(driver_id: int, add_passengers: int):
     """Обновляет количество занятых мест у водителя - ASYNC VERSION"""
     async with get_db() as db:
-        await db.execute('''UPDATE drivers 
-                           SET occupied_seats = occupied_seats + ? 
-                           WHERE user_id=?''', (add_passengers, driver_id))
+        await db.execute(
+            '''UPDATE drivers 
+               SET occupied_seats = occupied_seats + ? 
+               WHERE user_id=?''', 
+            (add_passengers, driver_id)
+        )
 
 
 
@@ -1112,52 +1086,38 @@ class RatingStates(StatesGroup):
 
 @dp.message(F.text == "⭐ Мой профиль")
 async def show_profile(message: types.Message):
-    conn = sqlite3.connect(DATABASE_FILE)
-    c = conn.cursor()
-    
-    c.execute("SELECT avg_rating, rating_count FROM drivers WHERE user_id=?", (message.from_user.id,))
-    driver = c.fetchone()
-    
-    c.execute("SELECT avg_rating, rating_count FROM clients WHERE user_id=?", (message.from_user.id,))
-    client = c.fetchone()
-    
-    if not driver and not client:
-        await message.answer("❌ Вы еще не зарегистрированы")
-        conn.close()
-        return
-    
-    msg = "⭐ <b>Ваш профиль</b>\n\n"
-    
-    if driver:
-        msg += f"<b>Как водитель:</b>\n"
-        msg += f"{get_rating_stars(driver[0] or 0)}\n"
-        msg += f"📊 Оценок: {driver[1] or 0}\n\n"
-    
-    if client:
-        msg += f"<b>Как клиент:</b>\n"
-        msg += f"{get_rating_stars(client[0] or 0)}\n"
-        msg += f"📊 Оценок: {client[1] or 0}\n\n"
-    
-    c.execute('''SELECT from_user_id, rating, review, created_at 
-                 FROM ratings WHERE to_user_id=? 
-                 ORDER BY created_at DESC LIMIT 5''', (message.from_user.id,))
-    reviews = c.fetchall()
-    
-    if reviews:
-        msg += "<b>Последние отзывы:</b>\n"
-        for review in reviews:
-            stars = "⭐" * review[1]
-            msg += f"\n{stars}\n"
-            if review[2]:
-                msg += f"💬 {review[2]}\n"
-    
-    conn.close()
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✍️ Оставить отзыв", callback_data="rate_start")]
-    ])
-    
-    await message.answer(msg, reply_markup=keyboard, parse_mode="HTML")
+    async with get_db() as db:
+        async with db.execute("SELECT avg_rating, rating_count FROM drivers WHERE user_id=?", (message.from_user.id,)) as cursor:
+            driver = await cursor.fetchone()
+        async with db.execute("SELECT avg_rating, rating_count FROM clients WHERE user_id=?", (message.from_user.id,)) as cursor:
+            client = await cursor.fetchone()
+        if not driver and not client:
+            await message.answer("❌ Вы еще не зарегистрированы")
+            return
+        msg = "⭐ <b>Ваш профиль</b>\n\n"
+        if driver:
+            msg += f"<b>Как водитель:</b>\n"
+            msg += f"{get_rating_stars(driver[0] or 0)}\n"
+            msg += f"📊 Оценок: {driver[1] or 0}\n\n"
+        if client:
+            msg += f"<b>Как клиент:</b>\n"
+            msg += f"{get_rating_stars(client[0] or 0)}\n"
+            msg += f"📊 Оценок: {client[1] or 0}\n\n"
+        async with db.execute('''SELECT from_user_id, rating, review, created_at 
+                                 FROM ratings WHERE to_user_id=? 
+                                 ORDER BY created_at DESC LIMIT 5''', (message.from_user.id,)) as cursor:
+            reviews = await cursor.fetchall()
+        if reviews:
+            msg += "<b>Последние отзывы:</b>\n"
+            for review in reviews:
+                stars = "⭐" * review[1]
+                msg += f"\n{stars}\n"
+                if review[2]:
+                    msg += f"💬 {review[2]}\n"
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✍️ Оставить отзыв", callback_data="rate_start")]
+        ])
+        await message.answer(msg, reply_markup=keyboard, parse_mode="HTML")
 
 @dp.callback_query(F.data == "rate_start")
 async def rate_start(callback: types.CallbackQuery, state: FSMContext):
