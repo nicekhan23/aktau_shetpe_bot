@@ -978,37 +978,40 @@ async def client_pickup(message: types.Message, state: FSMContext):
 async def client_dropoff(message: types.Message, state: FSMContext):
     data = await state.get_data()
     
-    conn = sqlite3.connect(DATABASE_FILE)
-    c = conn.cursor()
-    
-    # Вычисляем позицию в очереди
-    c.execute(
-        "SELECT MAX(queue_position) FROM clients WHERE direction=?",
-        (data['direction'],)
-    )
-    max_pos = c.fetchone()[0]
-    queue_pos = (max_pos or 0) + 1
-    
-    # Добавляем клиента
-    c.execute('''INSERT INTO clients 
-                 (user_id, full_name, phone, direction, queue_position, passengers_count,
-                  pickup_location, dropoff_location, is_verified, status)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'waiting')''',
-              (message.from_user.id, message.from_user.full_name or "Клиент",
-               "+77777777777", data['direction'], queue_pos, data['passengers_count'],
-               data['pickup_location'], message.text))
-    conn.commit()
-    
-    # Проверяем подходящих водителей
-    c.execute('''SELECT COUNT(*), 
-                        GROUP_CONCAT(car_model || ' (' || (total_seats - occupied_seats) || ' мест)', ', ')
-                 FROM drivers 
-                 WHERE direction=? AND is_active=1 
-                 AND (total_seats - occupied_seats) >= ?''',
-              (data['direction'], data['passengers_count']))
-    suitable = c.fetchone()
-    
-    conn.close()
+    async with get_db() as db:  # USE ASYNC
+        # Вычисляем позицию в очереди
+        async with db.execute(
+            "SELECT MAX(queue_position) FROM clients WHERE direction=?",
+            (data['direction'],)
+        ) as cursor:
+            max_pos = (await cursor.fetchone())[0]
+        
+        queue_pos = (max_pos or 0) + 1
+        
+        # Добавляем клиента
+        await db.execute('''INSERT INTO clients 
+                     (user_id, full_name, phone, direction, queue_position, passengers_count,
+                      pickup_location, dropoff_location, is_verified, status)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'waiting')''',
+                  (message.from_user.id, message.from_user.full_name or "Клиент",
+                   "+77777777777", data['direction'], queue_pos, data['passengers_count'],
+                   data['pickup_location'], message.text))
+        
+        # Проверяем подходящих водителей
+        async with db.execute('''SELECT COUNT(*), 
+                            GROUP_CONCAT(car_model || ' (' || (total_seats - occupied_seats) || ' мест)', ', ')
+                     FROM drivers 
+                     WHERE direction=? AND is_active=1 
+                     AND (total_seats - occupied_seats) >= ?''',
+                  (data['direction'], data['passengers_count'])) as cursor:
+            suitable = await cursor.fetchone()
+        
+        # Получаем водителей для уведомления
+        async with db.execute('''SELECT user_id FROM drivers 
+                     WHERE direction=? AND is_active=1 
+                     AND (total_seats - occupied_seats) >= ?''',
+                  (data['direction'], data['passengers_count'])) as cursor:
+            drivers = await cursor.fetchall()
     
     await save_log_action(message.from_user.id, "client_ordered", 
                    f"Direction: {data['direction']}, Passengers: {data['passengers_count']}")
@@ -1034,15 +1037,6 @@ async def client_dropoff(message: types.Message, state: FSMContext):
     )
     
     # Уведомляем водителей о новом заказе
-    conn = sqlite3.connect(DATABASE_FILE)
-    c = conn.cursor()
-    c.execute('''SELECT user_id FROM drivers 
-                 WHERE direction=? AND is_active=1 
-                 AND (total_seats - occupied_seats) >= ?''',
-              (data['direction'], data['passengers_count']))
-    drivers = c.fetchall()
-    conn.close()
-    
     for driver in drivers:
         try:
             await bot.send_message(
@@ -1060,51 +1054,46 @@ async def client_dropoff(message: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data == "client_cancel")
 async def client_cancel_order(callback: types.CallbackQuery):
-    conn = sqlite3.connect(DATABASE_FILE)
-    c = conn.cursor()
-    
-    c.execute("SELECT * FROM clients WHERE user_id=?", (callback.from_user.id,))
-    client = c.fetchone()
-    
-    if not client:
-        await callback.answer("❌ У вас нет активного заказа", show_alert=True)
-        conn.close()
-        return
-    
-    # Если клиент был принят водителем, освобождаем места
-    if client[11]:  # assigned_driver_id
-        await update_driver_seats(client[11], -client[5])  # Отнимаем пассажиров
+    async with get_db() as db:
+        async with db.execute("SELECT * FROM clients WHERE user_id=?", (callback.from_user.id,)) as cursor:
+            client = await cursor.fetchone()
         
-        # Уведомляем водителя
-        try:
-            await bot.send_message(
-                client[11],
-                f"⚠️ Клиент {client[1]} отменил заказ\n"
-                f"Освобождено мест: {client[5]}",
-                parse_mode="HTML"
-            )
-        except:
-            pass
-    
-    # Обновляем trip
-    c.execute('''UPDATE trips SET status='cancelled', cancelled_by='client', 
-                 cancelled_at=CURRENT_TIMESTAMP 
-                 WHERE client_id=? AND status IN ('waiting', 'accepted', 'driver_arrived')''',
-              (callback.from_user.id,))
-    
-    # Удаляем клиента
-    direction = client[3]
-    c.execute("DELETE FROM clients WHERE user_id=?", (callback.from_user.id,))
-    
-    # Пересчитываем позиции
-    c.execute('''SELECT user_id FROM clients 
-                 WHERE direction=? ORDER BY queue_position''', (direction,))
-    clients = c.fetchall()
-    for pos, client_id in enumerate(clients, 1):
-        c.execute("UPDATE clients SET queue_position=? WHERE user_id=?", (pos, client_id[0]))
-    
-    conn.commit()
-    conn.close()
+        if not client:
+            await callback.answer("❌ У вас нет активного заказа", show_alert=True)
+            return
+        
+        # Если клиент был принят водителем, освобождаем места
+        if client[11]:  # assigned_driver_id
+            await update_driver_seats(client[11], -client[5])  # Отнимаем пассажиров
+            
+            # Уведомляем водителя
+            try:
+                await bot.send_message(
+                    client[11],
+                    f"⚠️ Клиент {client[1]} отменил заказ\n"
+                    f"Освобождено мест: {client[5]}",
+                    parse_mode="HTML"
+                )
+            except:
+                pass
+        
+        # Обновляем trip
+        await db.execute('''UPDATE trips SET status='cancelled', cancelled_by='client', 
+                     cancelled_at=CURRENT_TIMESTAMP 
+                     WHERE client_id=? AND status IN ('waiting', 'accepted', 'driver_arrived')''',
+                  (callback.from_user.id,))
+        
+        # Удаляем клиента
+        direction = client[3]
+        await db.execute("DELETE FROM clients WHERE user_id=?", (callback.from_user.id,))
+        
+        # Пересчитываем позиции
+        async with db.execute('''SELECT user_id FROM clients 
+                     WHERE direction=? ORDER BY queue_position''', (direction,)) as cursor:
+            clients = await cursor.fetchall()
+        
+        for pos, client_id in enumerate(clients, 1):
+            await db.execute("UPDATE clients SET queue_position=? WHERE user_id=?", (pos, client_id[0]))
     
     await save_log_action(callback.from_user.id, "client_cancelled", "")
     
@@ -1246,29 +1235,24 @@ async def save_review(message: types.Message, state: FSMContext):
     data = await state.get_data()
     review = None if message.text == "/skip" else message.text
     
-    conn = sqlite3.connect(DATABASE_FILE)
-    c = conn.cursor()
-    
-    c.execute('''SELECT driver_id, client_id FROM trips WHERE id=?''', (data['trip_id'],))
-    trip = c.fetchone()
-    
-    is_driver = trip[0] == message.from_user.id
-    target_id = trip[1] if is_driver else trip[0]
-    user_type = "driver" if not is_driver else "client"
-    
-    c.execute('''INSERT INTO ratings (from_user_id, to_user_id, user_type, trip_id, rating, review)
-                 VALUES (?, ?, ?, ?, ?, ?)''',
-              (message.from_user.id, target_id, user_type, data['trip_id'], data['rating'], review))
-    
-    table = "drivers" if user_type == "driver" else "clients"
-    c.execute(f'''UPDATE {table} 
-                  SET avg_rating = (SELECT AVG(rating) FROM ratings WHERE to_user_id=?),
-                      rating_count = (SELECT COUNT(*) FROM ratings WHERE to_user_id=?)
-                  WHERE user_id=?''',
-              (target_id, target_id, target_id))
-    
-    conn.commit()
-    conn.close()
+    async with get_db() as db:
+        async with db.execute('''SELECT driver_id, client_id FROM trips WHERE id=?''', (data['trip_id'],)) as cursor:
+            trip = await cursor.fetchone()
+        
+        is_driver = trip[0] == message.from_user.id
+        target_id = trip[1] if is_driver else trip[0]
+        user_type = "driver" if not is_driver else "client"
+        
+        await db.execute('''INSERT INTO ratings (from_user_id, to_user_id, user_type, trip_id, rating, review)
+                     VALUES (?, ?, ?, ?, ?, ?)''',
+                  (message.from_user.id, target_id, user_type, data['trip_id'], data['rating'], review))
+        
+        table = "drivers" if user_type == "driver" else "clients"
+        await db.execute(f'''UPDATE {table} 
+                      SET avg_rating = (SELECT AVG(rating) FROM ratings WHERE to_user_id=?),
+                          rating_count = (SELECT COUNT(*) FROM ratings WHERE to_user_id=?)
+                      WHERE user_id=?''',
+                  (target_id, target_id, target_id))
     
     await save_log_action(message.from_user.id, "rating_submitted", 
                    f"Target: {target_id}, Rating: {data['rating']}")
@@ -1354,7 +1338,7 @@ def admin_keyboard():
 
 @dp.message(Command("admin"))
 async def admin_panel(message: types.Message):
-    if not is_admin(message.from_user.id):
+    if not await is_admin(message.from_user.id):
         await message.answer("❌ Нет доступа")
         return
     
@@ -1366,15 +1350,13 @@ async def admin_panel(message: types.Message):
 
 @dp.callback_query(F.data == "admin_drivers")
 async def admin_drivers(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
+    if not await is_admin(callback.from_user.id):
         await callback.answer("❌ Нет доступа", show_alert=True)
         return
     
-    conn = sqlite3.connect(DATABASE_FILE)
-    c = conn.cursor()
-    c.execute("SELECT * FROM drivers ORDER BY direction, queue_position")
-    drivers = c.fetchall()
-    conn.close()
+    async with get_db() as db:
+        async with db.execute("SELECT * FROM drivers ORDER BY direction, queue_position") as cursor:
+            drivers = await cursor.fetchall()
     
     if not drivers:
         msg = "❌ Водителей нет"
@@ -1393,15 +1375,13 @@ async def admin_drivers(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "admin_clients")
 async def admin_clients(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
+    if not await is_admin(callback.from_user.id):
         await callback.answer("❌ Нет доступа", show_alert=True)
         return
     
-    conn = sqlite3.connect(DATABASE_FILE)
-    c = conn.cursor()
-    c.execute("SELECT * FROM clients ORDER BY direction, queue_position")
-    clients = c.fetchall()
-    conn.close()
+    async with get_db() as db:
+        async with db.execute("SELECT * FROM clients ORDER BY direction, queue_position") as cursor:
+            clients = await cursor.fetchall()
     
     if not clients:
         msg = "❌ Клиентов нет"
@@ -1423,35 +1403,31 @@ async def admin_clients(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "admin_stats")
 async def admin_stats(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
+    if not await is_admin(callback.from_user.id):
         await callback.answer("❌ Нет доступа", show_alert=True)
         return
     
-    conn = sqlite3.connect(DATABASE_FILE)
-    c = conn.cursor()
-    
-    c.execute("SELECT COUNT(*) FROM drivers")
-    total_drivers = c.fetchone()[0]
-    
-    c.execute("SELECT COUNT(*) FROM clients WHERE status='waiting'")
-    waiting_clients = c.fetchone()[0]
-    
-    c.execute("SELECT COUNT(*) FROM clients WHERE status='accepted'")
-    accepted_clients = c.fetchone()[0]
-    
-    c.execute("SELECT COUNT(*) FROM trips WHERE status='completed'")
-    completed_trips = c.fetchone()[0]
-    
-    c.execute("SELECT COUNT(*) FROM trips WHERE cancelled_by IS NOT NULL")
-    cancelled_trips = c.fetchone()[0]
-    
-    c.execute("SELECT AVG(rating) FROM ratings")
-    avg_rating = c.fetchone()[0] or 0
-    
-    c.execute("SELECT SUM(total_seats - occupied_seats) FROM drivers WHERE is_active=1")
-    total_available_seats = c.fetchone()[0] or 0
-    
-    conn.close()
+    async with get_db() as db:
+        async with db.execute("SELECT COUNT(*) FROM drivers") as cursor:
+            total_drivers = (await cursor.fetchone())[0]
+        
+        async with db.execute("SELECT COUNT(*) FROM clients WHERE status='waiting'") as cursor:
+            waiting_clients = (await cursor.fetchone())[0]
+        
+        async with db.execute("SELECT COUNT(*) FROM clients WHERE status='accepted'") as cursor:
+            accepted_clients = (await cursor.fetchone())[0]
+        
+        async with db.execute("SELECT COUNT(*) FROM trips WHERE status='completed'") as cursor:
+            completed_trips = (await cursor.fetchone())[0]
+        
+        async with db.execute("SELECT COUNT(*) FROM trips WHERE cancelled_by IS NOT NULL") as cursor:
+            cancelled_trips = (await cursor.fetchone())[0]
+        
+        async with db.execute("SELECT AVG(rating) FROM ratings") as cursor:
+            avg_rating = (await cursor.fetchone())[0] or 0
+        
+        async with db.execute("SELECT SUM(total_seats - occupied_seats) FROM drivers WHERE is_active=1") as cursor:
+            total_available_seats = (await cursor.fetchone())[0] or 0
     
     msg = "📊 <b>Статистика:</b>\n\n"
     msg += f"👥 Водителей: {total_drivers}\n"
@@ -1467,17 +1443,15 @@ async def admin_stats(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "admin_logs")
 async def admin_logs(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
+    if not await is_admin(callback.from_user.id):
         await callback.answer("❌ Нет доступа", show_alert=True)
         return
     
-    conn = sqlite3.connect(DATABASE_FILE)
-    c = conn.cursor()
-    c.execute('''SELECT user_id, action, details, created_at 
-                 FROM actions_log 
-                 ORDER BY created_at DESC LIMIT 20''')
-    logs = c.fetchall()
-    conn.close()
+    async with get_db() as db:
+        async with db.execute('''SELECT user_id, action, details, created_at 
+                     FROM actions_log 
+                     ORDER BY created_at DESC LIMIT 20''') as cursor:
+            logs = await cursor.fetchall()
     
     msg = "📜 <b>Последние действия:</b>\n\n"
     for log in logs:
@@ -1496,7 +1470,7 @@ async def admin_logs(callback: types.CallbackQuery):
 
 @dp.message(Command("addadmin"))
 async def add_admin_command(message: types.Message):
-    if not is_admin(message.from_user.id):
+    if not await is_admin(message.from_user.id):
         await message.answer("❌ Нет доступа")
         return
     
@@ -1507,11 +1481,8 @@ async def add_admin_command(message: types.Message):
     
     try:
         new_admin_id = int(parts[1])
-        conn = sqlite3.connect(DATABASE_FILE)
-        c = conn.cursor()
-        c.execute("INSERT INTO admins (user_id) VALUES (?)", (new_admin_id,))
-        conn.commit()
-        conn.close()
+        async with get_db() as db:
+            await db.execute("INSERT INTO admins (user_id) VALUES (?)", (new_admin_id,))
         
         await save_log_action(message.from_user.id, "admin_added", f"New admin: {new_admin_id}")
         await message.answer(f"✅ Админ добавлен: {new_admin_id}")
