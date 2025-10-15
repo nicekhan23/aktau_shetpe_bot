@@ -264,14 +264,6 @@ async def save_log_action(user_id: int, action: str, details: str = ""):
                            VALUES (?, ?, ?)''', (user_id, action, details))
     log_action(user_id, action, details)
 
-
-def save_log_action(user_id: int, action: str, details: str = ""):
-    with get_db() as conn:
-        c = conn.cursor()
-        c.execute('''INSERT INTO actions_log (user_id, action, details) 
-                     VALUES (?, ?, ?)''', (user_id, action, details))
-
-
 async def get_driver_available_seats(driver_id: int) -> tuple:
     """Возвращает (занято мест, всего мест, свободно мест) - ASYNC VERSION"""
     async with get_db() as db:
@@ -478,7 +470,7 @@ async def driver_direction(callback: types.CallbackQuery, state: FSMContext):
     conn.commit()
     conn.close()
     
-    save_log_action(callback.from_user.id, "driver_registered", 
+    await save_log_action(callback.from_user.id, "driver_registered", 
                    f"Direction: {direction}, Queue: {queue_pos}")
     
     await callback.message.edit_text(
@@ -518,7 +510,7 @@ async def show_driver_menu(message: types.Message, user_id: int):
     
     # Проверяем наличие occupied_seats
     if 'occupied_seats' in columns and 'total_seats' in columns:
-        occupied, total, available = get_driver_available_seats(user_id)
+        occupied, total, available = await get_driver_available_seats(user_id)
         seats_text = f"💺 Места: {occupied}/{total} (свободно: {available})\n"
     else:
         total_seats_idx = columns.index('total_seats') if 'total_seats' in columns else 5
@@ -563,7 +555,7 @@ async def driver_status(callback: types.CallbackQuery):
     waiting = c.fetchone()[0]
     conn.close()
     
-    occupied, total, available = get_driver_available_seats(callback.from_user.id)
+    occupied, total, available = await get_driver_available_seats(callback.from_user.id)
     
     await callback.message.edit_text(
         f"📊 <b>Ваш статус</b>\n\n"
@@ -620,7 +612,7 @@ async def driver_available_orders(callback: types.CallbackQuery):
     c.execute("SELECT direction FROM drivers WHERE user_id=?", (callback.from_user.id,))
     driver_dir = c.fetchone()[0]
     
-    occupied, total, available = get_driver_available_seats(callback.from_user.id)
+    occupied, total, available = await get_driver_available_seats(callback.from_user.id)
     
     if available == 0:
         await callback.answer("❌ Нет свободных мест!", show_alert=True)
@@ -779,7 +771,7 @@ async def driver_arrived(callback: types.CallbackQuery):
     conn.commit()
     conn.close()
     
-    save_log_action(callback.from_user.id, "driver_arrived", f"Clients: {len(clients)}")
+    await save_log_action(callback.from_user.id, "driver_arrived", f"Clients: {len(clients)}")
     
     # Уведомляем всех клиентов
     for client in clients:
@@ -835,7 +827,7 @@ async def driver_complete_trip(callback: types.CallbackQuery):
     conn.commit()
     conn.close()
     
-    save_log_action(callback.from_user.id, "trip_completed", f"Freed {total_freed} seats")
+    await save_log_action(callback.from_user.id, "trip_completed", f"Freed {total_freed} seats")
     
     # Уведомляем клиентов о завершении
     for client in clients:
@@ -888,7 +880,7 @@ async def driver_exit(callback: types.CallbackQuery):
     conn.commit()
     conn.close()
     
-    save_log_action(callback.from_user.id, "driver_exit", "")
+    await save_log_action(callback.from_user.id, "driver_exit", "")
     
     await callback.message.delete()
     await callback.message.answer(
@@ -1060,7 +1052,7 @@ async def client_dropoff(message: types.Message, state: FSMContext):
     
     conn.close()
     
-    save_log_action(message.from_user.id, "client_ordered", 
+    await save_log_action(message.from_user.id, "client_ordered", 
                    f"Direction: {data['direction']}, Passengers: {data['passengers_count']}")
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -1123,7 +1115,7 @@ async def client_cancel_order(callback: types.CallbackQuery):
     
     # Если клиент был принят водителем, освобождаем места
     if client[11]:  # assigned_driver_id
-        update_driver_seats(client[11], -client[5])  # Отнимаем пассажиров
+        await update_driver_seats(client[11], -client[5])  # Отнимаем пассажиров
         
         # Уведомляем водителя
         try:
@@ -1156,7 +1148,7 @@ async def client_cancel_order(callback: types.CallbackQuery):
     conn.commit()
     conn.close()
     
-    save_log_action(callback.from_user.id, "client_cancelled", "")
+    await save_log_action(callback.from_user.id, "client_cancelled", "")
     
     await callback.message.edit_text(
         "❌ <b>Заказ отменен</b>\n\n"
@@ -1320,7 +1312,7 @@ async def save_review(message: types.Message, state: FSMContext):
     conn.commit()
     conn.close()
     
-    save_log_action(message.from_user.id, "rating_submitted", 
+    await save_log_action(message.from_user.id, "rating_submitted", 
                    f"Target: {target_id}, Rating: {data['rating']}")
     
     await message.answer(
@@ -1334,7 +1326,7 @@ async def save_review(message: types.Message, state: FSMContext):
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    save_log_action(message.from_user.id, "bot_started", "")
+    await save_log_action(message.from_user.id, "bot_started", "")
     
     await message.answer(
         f"Привет, {message.from_user.first_name}! 👋\n\n"
@@ -1431,7 +1423,7 @@ async def admin_drivers(callback: types.CallbackQuery):
     else:
         msg = "👥 <b>Водители:</b>\n\n"
         for driver in drivers:
-            occupied, total, available = get_driver_available_seats(driver[0])
+            occupied, total, available = await get_driver_available_seats(driver[0])
             msg += f"№{driver[7]} - {driver[1]}\n"
             msg += f"   🚗 {driver[4]} ({driver[3]})\n"
             msg += f"   💺 {occupied}/{total} (своб: {available})\n"
@@ -1563,7 +1555,7 @@ async def add_admin_command(message: types.Message):
         conn.commit()
         conn.close()
         
-        save_log_action(message.from_user.id, "admin_added", f"New admin: {new_admin_id}")
+        await save_log_action(message.from_user.id, "admin_added", f"New admin: {new_admin_id}")
         await message.answer(f"✅ Админ добавлен: {new_admin_id}")
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
@@ -1571,7 +1563,7 @@ async def add_admin_command(message: types.Message):
 # ==================== СТАРТ ====================
 
 async def main():
-    init_db()
+    await init_db()
     logger.info("🚀 Бот запущен")
     await dp.start_polling(bot)
 
