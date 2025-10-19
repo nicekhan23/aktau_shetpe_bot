@@ -2466,6 +2466,156 @@ async def check_config_command(message: types.Message):
                     )
     except Exception as e:
         await message.answer(f"❌ Ошибка подключения: {e}")
+        
+@dp.message(Command("checkdirections"))
+async def check_directions_command(message: types.Message):
+    """Проверка доступных направлений отправки SMS"""
+    if not await is_admin(message.from_user.id):
+        await message.answer("❌ Нет доступа")
+        return
+    
+    api_key = os.getenv("MOBIZON_API_KEY", "")
+    
+    if not api_key:
+        await message.answer("❌ MOBIZON_API_KEY не установлен!")
+        return
+    
+    await message.answer("🔍 Проверяю настройки аккаунта...")
+    
+    # Получаем информацию о балансе и настройках
+    url = "https://api.mobizon.kz/service/user/getownbalance"
+    params = {"apiKey": api_key, "output": "json"}
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, timeout=10) as response:
+                result = await response.json()
+                
+                if result.get("code") == 0:
+                    data = result.get("data", {})
+                    
+                    msg = "📊 <b>Информация об аккаунте:</b>\n\n"
+                    msg += f"💰 Баланс: {data.get('balance', 0)} {data.get('currency', 'KZT')}\n"
+                    msg += f"📧 Email: {data.get('email', 'N/A')}\n\n"
+                    
+                    msg += "📱 <b>Тестирование направлений:</b>\n\n"
+                    
+                    # Тестируем разные коды операторов Казахстана
+                    test_numbers = {
+                        "Beeline KZ": "77765224550",
+                        "Kcell": "77015224550",
+                        "Activ (Казахтелеком)": "77755224550",
+                        "Tele2 KZ": "77075224550"
+                    }
+                    
+                    await message.answer(msg, parse_mode="HTML")
+                    
+                    # Проверяем каждое направление
+                    for operator, test_num in test_numbers.items():
+                        check_url = "https://api.mobizon.kz/service/message/sendsmsmessage"
+                        check_params = {
+                            "apiKey": api_key,
+                            "recipient": test_num,
+                            "text": "Test",
+                            "dryRun": "1"  # Тестовый режим - не отправляет реально
+                        }
+                        
+                        try:
+                            async with session.get(check_url, params=check_params, timeout=10) as resp:
+                                check_result = await resp.json()
+                                
+                                if check_result.get("code") == 0:
+                                    status = f"✅ {operator}: Разрешено"
+                                else:
+                                    error = check_result.get("data", {}).get("recipient", "Unknown")
+                                    status = f"❌ {operator}: {error}"
+                                
+                                await message.answer(status)
+                                await asyncio.sleep(0.5)
+                        except:
+                            await message.answer(f"⚠️ {operator}: Ошибка проверки")
+                    
+                    await message.answer(
+                        "\n💡 <b>Что делать если все заблокировано:</b>\n\n"
+                        "1. Зайди на mobizon.kz\n"
+                        "2. Настройки → API → Ограничения\n"
+                        "3. Включи отправку в Казахстан\n"
+                        "4. Или обратись в поддержку:\n"
+                        "   support@mobizon.kz\n"
+                        "   +7 (727) 311-11-11",
+                        parse_mode="HTML"
+                    )
+                else:
+                    await message.answer(
+                        f"❌ Ошибка API:\n"
+                        f"Код: {result.get('code')}\n"
+                        f"Сообщение: {result.get('message', 'Unknown')}"
+                    )
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+
+
+@dp.message(Command("testoperators"))
+async def test_operators_command(message: types.Message):
+    """Тест отправки на разные операторы Казахстана"""
+    if not await is_admin(message.from_user.id):
+        await message.answer("❌ Нет доступа")
+        return
+    
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer(
+            "Используйте: /testoperators +77XXXXXXXXX\n\n"
+            "Операторы Казахстана:\n"
+            "• Kcell: +7 700-705, +7 771, +7 777-778\n"
+            "• Beeline: +7 776\n"
+            "• Activ: +7 775\n"
+            "• Tele2: +7 707"
+        )
+        return
+    
+    phone = parts[1]
+    phone_clean = ''.join(filter(str.isdigit, phone.strip()))
+    
+    if not phone_clean.startswith('7'):
+        phone_clean = '7' + phone_clean
+    
+    if len(phone_clean) != 11:
+        await message.answer(f"❌ Неверная длина номера: {len(phone_clean)} (должно быть 11)")
+        return
+    
+    # Определяем оператора
+    prefix = phone_clean[1:4]  # Берём 3 цифры после 7
+    
+    operators = {
+        '700': 'Kcell', '701': 'Kcell', '702': 'Kcell', '705': 'Kcell',
+        '771': 'Kcell', '777': 'Kcell', '778': 'Kcell',
+        '776': 'Beeline KZ',
+        '775': 'Activ (Казахтелеком)',
+        '707': 'Tele2 KZ'
+    }
+    
+    operator = operators.get(prefix, 'Неизвестный оператор')
+    
+    await message.answer(
+        f"📱 <b>Анализ номера:</b>\n\n"
+        f"Номер: <code>{phone_clean}</code>\n"
+        f"Оператор: {operator}\n"
+        f"Префикс: {prefix}\n\n"
+        f"Отправляю тестовое SMS...",
+        parse_mode="HTML"
+    )
+    
+    test_msg = f"Test от TaxiBot: {datetime.now().strftime('%H:%M')}"
+    success = await send_sms(phone, test_msg)
+    
+    if success:
+        await message.answer("✅ SMS отправлено!")
+    else:
+        await message.answer(
+            "❌ Не удалось отправить\n\n"
+            "Возможно этот оператор заблокирован в настройках аккаунта"
+        )
 
 @dp.message(Command("balance"))
 async def check_balance_command(message: types.Message):
