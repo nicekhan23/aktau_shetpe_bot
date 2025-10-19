@@ -3,6 +3,8 @@ import sqlite3
 import aiosqlite
 import os
 import logging
+import aiohttp
+import urllib.parse
 from datetime import datetime
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types, F
@@ -84,8 +86,50 @@ def generate_verification_code() -> str:
     return ''.join(random.choices(string.digits, k=4))
 
 async def send_sms(phone: str, message: str) -> bool:
-    logger.info(f"SMS отправлено на {phone}: {message}")
-    return True
+    """Отправка SMS через Mobizon.kz (простой метод)"""
+    api_key = os.getenv("MOBIZON_API_KEY", "")
+    sender_name = os.getenv("MOBIZON_SENDER", "InfoCentr")  # Дефолтное имя
+    
+    if not api_key:
+        logger.warning(f"[TEST MODE] SMS для {phone}: {message}")
+        return True
+    
+    # Убираем '+' и пробелы
+    phone_clean = phone.replace('+', '').replace(' ', '')
+    
+    # URL API Mobizon
+    url = "https://api.mobizon.kz/service/message/sendsmsmessage"
+    
+    params = {
+        "apiKey": api_key,
+        "recipient": phone_clean,
+        "text": message,
+        "from": sender_name
+    }
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, timeout=15) as response:
+                result = await response.json()
+                
+                # Проверяем ответ
+                if result.get("code") == 0:  # 0 = успех
+                    message_id = result.get("data", {}).get("messageId", "unknown")
+                    logger.info(f"✅ SMS отправлено на {phone} (ID: {message_id})")
+                    return True
+                else:
+                    error_msg = result.get("message", "Unknown error")
+                    error_code = result.get("code", -1)
+                    logger.error(f"❌ Ошибка Mobizon ({error_code}): {error_msg}")
+                    return False
+                    
+    except asyncio.TimeoutError:
+        logger.error(f"⏱️ Таймаут при отправке SMS на {phone}")
+        return False
+    except Exception as e:
+        logger.error(f"💥 Ошибка отправки SMS: {e}")
+        return False
+
 
 # ==================== БД И МИГРАЦИИ ====================
 
