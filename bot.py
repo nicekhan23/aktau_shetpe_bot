@@ -500,7 +500,7 @@ class DriverReg(StatesGroup):
     car_number = State()
     car_model = State()
     seats = State()
-    direction = State()
+    current_city = State()
 
 @dp.message(F.text == "🚗 Я водитель")
 async def driver_start(message: types.Message, state: FSMContext):
@@ -592,75 +592,61 @@ async def driver_seats(message: types.Message, state: FSMContext):
             return
         await state.update_data(seats=seats)
         await message.answer(
-            "Выберите маршрут:",
-            reply_markup=direction_keyboard()
+            "📍 В каком городе вы находитесь сейчас?",
+            reply_markup=current_city_keyboard()
         )
-        await state.set_state(DriverReg.direction)
+        await state.set_state(DriverReg.current_city)
     except ValueError:
         await message.answer("Введите число!")
 
-@dp.callback_query(DriverReg.direction, F.data.startswith("dir_"))
-async def driver_direction(callback: types.CallbackQuery, state: FSMContext):
-    direction_map = {
-        "dir_aktau_shetpe": "Ақтау → Шетпе",
-        "dir_aktau_janaozen": "Ақтау → Жаңаөзен",
-        "dir_shetpe_aktau": "Шетпе → Ақтау",
-        "dir_shetpe_janaozen": "Шетпе → Жаңаөзен",
-        "dir_janaozen_aktau": "Жаңаөзен → Ақтау",
-        "dir_janaozen_shetpe": "Жаңаөзен → Шетпе"
+@dp.callback_query(DriverReg.current_city, F.data.startswith("city_"))
+async def driver_current_city(callback: types.CallbackQuery, state: FSMContext):
+    city_map = {
+        "city_aktau": "Ақтау",
+        "city_janaozen": "Жаңаөзен",
+        "city_shetpe": "Шетпе"
     }
     
-    direction = direction_map.get(callback.data, "Шетпе → Ақтау")
+    current_city = city_map.get(callback.data, "Ақтау")
     data = await state.get_data()
     
     async with get_db(write=True) as db:
-        async with db.execute(
-            "SELECT MAX(queue_position) FROM drivers WHERE direction=? AND is_active=1",
-            (direction,)
-        ) as cursor:
-            max_pos = (await cursor.fetchone())[0]
-        
-        queue_pos = (max_pos or 0) + 1
-        
+        # Водитель регистрируется с текущим городом (без направления)
+        # direction теперь будет current_city (откуда он может брать заказы)
         await db.execute('''INSERT INTO drivers 
                      (user_id, full_name, phone, car_number, car_model, total_seats, 
                       direction, queue_position, is_active, is_verified, occupied_seats)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1, 0)''',
+                     VALUES (?, ?, ?, ?, ?, ?, ?, 0, 1, 1, 0)''',
                   (callback.from_user.id, data['full_name'], data['phone'], data['car_number'],
-                   data['car_model'], data['seats'], direction, queue_pos))
+                   data['car_model'], data['seats'], current_city, 0))
     
     await save_log_action(callback.from_user.id, "driver_registered", 
-                   f"Direction: {direction}, Queue: {queue_pos}")
+                   f"Current city: {current_city}")
     
     await callback.message.edit_text(
         f"✅ <b>Вы зарегистрированы!</b>\n\n"
         f"👤 {data['full_name']}\n"
         f"🚗 {data['car_model']} ({data['car_number']})\n"
         f"💺 Мест: {data['seats']}\n"
-        f"📍 {direction}\n"
-        f"📊 Позиция: №{queue_pos}\n\n"
-        f"⏳ Ждите клиентов!",
+        f"📍 Текущий город: {current_city}\n\n"
+        f"Вы будете видеть все заказы, выезжающие из города {current_city}",
         parse_mode="HTML"
     )
     await state.clear()
     
-def direction_keyboard():
-    """Выбор маршрута для водителей - ВСЕ КОМБИНАЦИИ ГОРОДОВ"""
+def current_city_keyboard():
+    """Выбор текущего города водителя"""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Ақтау → Шетпе", callback_data="dir_aktau_shetpe")],
-            [InlineKeyboardButton(text="Ақтау → Жаңаөзен", callback_data="dir_aktau_janaozen")],
-            [InlineKeyboardButton(text="Шетпе → Ақтау", callback_data="dir_shetpe_aktau")],
-            [InlineKeyboardButton(text="Шетпе → Жаңаөзен", callback_data="dir_shetpe_janaozen")],
-            [InlineKeyboardButton(text="Жаңаөзен → Ақтау", callback_data="dir_janaozen_aktau")],
-            [InlineKeyboardButton(text="Жаңаөзен → Шетпе", callback_data="dir_janaozen_shetpe")],
+            [InlineKeyboardButton(text="Ақтау", callback_data="city_aktau")],
+            [InlineKeyboardButton(text="Жаңаөзен", callback_data="city_janaozen")],
+            [InlineKeyboardButton(text="Шетпе", callback_data="city_shetpe")],
             [InlineKeyboardButton(text="🔙 Назад", callback_data="back_main")]
         ]
     )
 
 async def show_driver_menu(message: types.Message, user_id: int):
     async with get_db() as db:
-        # Получаем колонки для безопасной работы
         async with db.execute("PRAGMA table_info(drivers)") as cursor:
             columns = [col[1] for col in await cursor.fetchall()]
         
@@ -671,14 +657,11 @@ async def show_driver_menu(message: types.Message, user_id: int):
         await message.answer("Ошибка: вы не зарегистрированы", reply_markup=main_menu_keyboard())
         return
     
-    # Безопасно получаем индексы
     full_name_idx = columns.index('full_name') if 'full_name' in columns else 1
     car_number_idx = columns.index('car_number') if 'car_number' in columns else 2
     car_model_idx = columns.index('car_model') if 'car_model' in columns else 3
-    direction_idx = columns.index('direction') if 'direction' in columns else 6
-    queue_pos_idx = columns.index('queue_position') if 'queue_position' in columns else 7
+    direction_idx = columns.index('direction') if 'direction' in columns else 6  # Теперь это current_city
     
-    # Проверяем наличие occupied_seats
     if 'occupied_seats' in columns and 'total_seats' in columns:
         occupied, total, available = await get_driver_available_seats(user_id)
         seats_text = f"💺 Места: {occupied}/{total} (свободно: {available})\n"
@@ -687,7 +670,6 @@ async def show_driver_menu(message: types.Message, user_id: int):
         total = driver[total_seats_idx] if len(driver) > total_seats_idx else 4
         seats_text = f"💺 Мест: {total}\n"
     
-    # Рейтинг
     avg_rating_idx = columns.index('avg_rating') if 'avg_rating' in columns else None
     rating_text = get_rating_stars(driver[avg_rating_idx] if avg_rating_idx and len(driver) > avg_rating_idx else 0)
     
@@ -697,6 +679,7 @@ async def show_driver_menu(message: types.Message, user_id: int):
         [InlineKeyboardButton(text="🔔 Доступные заказы", callback_data="driver_available_orders")],
         [InlineKeyboardButton(text="🚗 Я приехал!", callback_data="driver_arrived")],
         [InlineKeyboardButton(text="✅ Завершить поездку", callback_data="driver_complete_trip")],
+        [InlineKeyboardButton(text="🔄 Сменить город", callback_data="driver_change_city")],  # НОВАЯ КНОПКА
         [InlineKeyboardButton(text="❌ Выйти из очереди", callback_data="driver_exit")],
         [InlineKeyboardButton(text="🔙 Меню", callback_data="back_main")]
     ])
@@ -706,10 +689,9 @@ async def show_driver_menu(message: types.Message, user_id: int):
         f"👤 {driver[full_name_idx]}\n"
         f"🚗 {driver[car_model_idx]} ({driver[car_number_idx]})\n"
         f"{seats_text}"
-        f"📍 {driver[direction_idx]}\n"
-        f"📊 Позиция: №{driver[queue_pos_idx]}\n"
+        f"📍 Текущий город: {driver[direction_idx]}\n"
         f"{rating_text}\n\n"
-        "Выберите действие:",
+        "Вы видите заказы, выезжающие из вашего города",
         reply_markup=keyboard,
         parse_mode="HTML"
     )
@@ -720,7 +702,8 @@ async def driver_status(callback: types.CallbackQuery):
         async with db.execute("SELECT * FROM drivers WHERE user_id=?", (callback.from_user.id,)) as cursor:
             driver = await cursor.fetchone()
         
-        async with db.execute("SELECT COUNT(*) FROM clients WHERE direction=? AND status='waiting'", (driver[6],)) as cursor:
+        # Считаем заказы из города водителя
+        async with db.execute("SELECT COUNT(*) FROM clients WHERE from_city=? AND status='waiting'", (driver[6],)) as cursor:
             waiting = (await cursor.fetchone())[0]
     
     occupied, total, available = await get_driver_available_seats(callback.from_user.id)
@@ -728,11 +711,10 @@ async def driver_status(callback: types.CallbackQuery):
     await callback.message.edit_text(
         f"📊 <b>Ваш статус</b>\n\n"
         f"🚗 {driver[4]} ({driver[3]})\n"
-        f"📍 {driver[6]}\n"
-        f"📊 Позиция: №{driver[7]}\n"
+        f"📍 Текущий город: {driver[6]}\n"
         f"💺 Занято: {occupied}/{total}\n"
         f"💺 Свободно: {available}\n"
-        f"⏳ Клиентов в очереди: {waiting}\n"
+        f"⏳ Заказов из вашего города: {waiting}\n"
         f"{get_rating_stars(driver[13] if len(driver) > 13 else 0)}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔙 Назад", callback_data="driver_menu")]
@@ -770,38 +752,39 @@ async def driver_passengers(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "driver_available_orders")
 async def driver_available_orders(callback: types.CallbackQuery):
-    """Показывает ВСЕ заказы, с пометкой о нехватке мест"""
+    """Показывает ВСЕ заказы из текущего города водителя"""
     async with get_db() as db:
+        # direction у водителя теперь = current_city
         async with db.execute("SELECT direction FROM drivers WHERE user_id=?", (callback.from_user.id,)) as cursor:
-            driver_dir = (await cursor.fetchone())[0]
+            driver_city = (await cursor.fetchone())[0]
         
         occupied, total, available = await get_driver_available_seats(callback.from_user.id)
         
-        # ИЗМЕНЕНО: Показываем ВСЕ заказы, не фильтруем по местам
+        # Показываем заказы, где from_city совпадает с городом водителя
         async with db.execute('''SELECT user_id, full_name, pickup_location, dropoff_location, 
-                            passengers_count, queue_position
+                            passengers_count, queue_position, direction, from_city, to_city
                      FROM clients 
-                     WHERE direction=? AND status='waiting'
-                     ORDER BY queue_position''', (driver_dir,)) as cursor:
+                     WHERE from_city=? AND status='waiting'
+                     ORDER BY queue_position''', (driver_city,)) as cursor:
             clients = await cursor.fetchall()
     
     if not clients:
-        msg = f"❌ Нет заказов\n\n💺 У вас свободно: {available} мест"
+        msg = f"❌ Нет заказов из города {driver_city}\n\n💺 У вас свободно: {available} мест"
     else:
-        msg = f"🔔 <b>Все заказы:</b>\n"
+        msg = f"🔔 <b>Заказы из {driver_city}:</b>\n"
         msg += f"💺 Свободно мест: {available}\n\n"
         
         keyboard_buttons = []
         for client in clients:
-            # ИЗМЕНЕНО: Помечаем заказы, которые не влезают
             can_fit = client[4] <= available
             fit_emoji = "✅" if can_fit else "⚠️"
             warning = "" if can_fit else " (не хватает мест!)"
             
+            # client[6] = direction (полный маршрут), client[8] = to_city
             msg += f"{fit_emoji} №{client[5]} - {client[1]} ({client[4]} чел.){warning}\n"
+            msg += f"   🎯 {client[6]}\n"  # Полный маршрут
             msg += f"   📍 {client[2]} → {client[3]}\n\n"
             
-            # ИЗМЕНЕНО: Показываем кнопки для всех, но с предупреждением
             button_text = f"✅ Взять №{client[5]} ({client[4]} чел.)"
             if not can_fit:
                 button_text = f"⚠️ Взять №{client[5]} ({client[4]} чел.) - мало мест!"
@@ -928,6 +911,66 @@ async def accept_client(callback: types.CallbackQuery):
     except Exception as e:
         logger.error(f"Error in accept_client: {e}", exc_info=True)
         await callback.answer("❌ Произошла ошибка. Попробуйте снова.", show_alert=True)
+        
+@dp.callback_query(F.data == "driver_change_city")
+async def driver_change_city(callback: types.CallbackQuery):
+    """Водитель меняет текущий город"""
+    async with get_db() as db:
+        # Проверяем активные поездки
+        async with db.execute('''SELECT COUNT(*) FROM clients 
+                     WHERE assigned_driver_id=? AND status IN ('accepted', 'driver_arrived')''',
+                  (callback.from_user.id,)) as cursor:
+            active_trips = (await cursor.fetchone())[0]
+        
+        if active_trips > 0:
+            await callback.answer(
+                "❌ Нельзя сменить город - есть активные поездки!",
+                show_alert=True
+            )
+            return
+    
+    await callback.message.edit_text(
+        "📍 <b>Смена города</b>\n\n"
+        "Выберите город, в котором вы находитесь:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Ақтау", callback_data="change_to_aktau")],
+            [InlineKeyboardButton(text="Жаңаөзен", callback_data="change_to_janaozen")],
+            [InlineKeyboardButton(text="Шетпе", callback_data="change_to_shetpe")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="driver_menu")]
+        ]),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("change_to_"))
+async def confirm_change_city(callback: types.CallbackQuery):
+    """Подтверждение смены города"""
+    city_map = {
+        "change_to_aktau": "Ақтау",
+        "change_to_janaozen": "Жаңаөзен",
+        "change_to_shetpe": "Шетпе"
+    }
+    
+    new_city = city_map[callback.data]
+    
+    async with get_db(write=True) as db:
+        await db.execute(
+            "UPDATE drivers SET direction=? WHERE user_id=?",
+            (new_city, callback.from_user.id)
+        )
+    
+    await save_log_action(callback.from_user.id, "city_changed", f"New city: {new_city}")
+    
+    await callback.message.edit_text(
+        f"✅ <b>Город изменён!</b>\n\n"
+        f"📍 Новый город: {new_city}\n\n"
+        f"Теперь вы видите заказы из города {new_city}",
+        parse_mode="HTML"
+    )
+    
+    await asyncio.sleep(2)
+    await show_driver_menu(callback.message, callback.from_user.id)
+    await callback.answer()
 
 @dp.callback_query(F.data == "driver_arrived")
 async def driver_arrived(callback: types.CallbackQuery):
@@ -1025,7 +1068,6 @@ async def driver_complete_trip(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "driver_exit")
 async def driver_exit(callback: types.CallbackQuery):
     async with get_db(write=True) as db:
-        # Проверяем активные поездки
         async with db.execute('''SELECT COUNT(*) FROM clients 
                      WHERE assigned_driver_id=? AND status IN ('accepted', 'driver_arrived')''',
                   (callback.from_user.id,)) as cursor:
@@ -1038,27 +1080,13 @@ async def driver_exit(callback: types.CallbackQuery):
             )
             return
         
-        # Get direction before deleting
-        async with db.execute("SELECT direction FROM drivers WHERE user_id=?", (callback.from_user.id,)) as cursor:
-            direction_row = await cursor.fetchone()
-            direction = direction_row[0] if direction_row else None
-        
         await db.execute("DELETE FROM drivers WHERE user_id=?", (callback.from_user.id,))
-        
-        # Пересчитываем позиции
-        if direction:
-            async with db.execute('''SELECT user_id FROM drivers 
-                         WHERE direction=? ORDER BY queue_position''', (direction,)) as cursor:
-                drivers = await cursor.fetchall()
-            
-            for pos, driver in enumerate(drivers, 1):
-                await db.execute("UPDATE drivers SET queue_position=? WHERE user_id=?", (pos, driver[0]))
     
     await save_log_action(callback.from_user.id, "driver_exit", "")
     
     await callback.message.delete()
     await callback.message.answer(
-        "❌ Вы вышли из очереди",
+        "❌ Вы вышли из системы",
         reply_markup=main_menu_keyboard()
     )
     await callback.answer()
