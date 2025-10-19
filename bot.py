@@ -601,7 +601,16 @@ async def driver_seats(message: types.Message, state: FSMContext):
 
 @dp.callback_query(DriverReg.direction, F.data.startswith("dir_"))
 async def driver_direction(callback: types.CallbackQuery, state: FSMContext):
-    direction = "Шетпе → Ақтау" if callback.data == "dir_shetpe_aktau" else "Ақтау → Шетпе"
+    direction_map = {
+        "dir_aktau_shetpe": "Ақтау → Шетпе",
+        "dir_aktau_janaozen": "Ақтау → Жаңаөзен",
+        "dir_shetpe_aktau": "Шетпе → Ақтау",
+        "dir_shetpe_janaozen": "Шетпе → Жаңаөзен",
+        "dir_janaozen_aktau": "Жаңаөзен → Ақтау",
+        "dir_janaozen_shetpe": "Жаңаөзен → Шетпе"
+    }
+    
+    direction = direction_map.get(callback.data, "Шетпе → Ақтау")
     data = await state.get_data()
     
     async with get_db(write=True) as db:
@@ -634,6 +643,20 @@ async def driver_direction(callback: types.CallbackQuery, state: FSMContext):
         parse_mode="HTML"
     )
     await state.clear()
+    
+def direction_keyboard():
+    """Выбор маршрута для водителей - ВСЕ КОМБИНАЦИИ ГОРОДОВ"""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Ақтау → Шетпе", callback_data="dir_aktau_shetpe")],
+            [InlineKeyboardButton(text="Ақтау → Жаңаөзен", callback_data="dir_aktau_janaozen")],
+            [InlineKeyboardButton(text="Шетпе → Ақтау", callback_data="dir_shetpe_aktau")],
+            [InlineKeyboardButton(text="Шетпе → Жаңаөзен", callback_data="dir_shetpe_janaozen")],
+            [InlineKeyboardButton(text="Жаңаөзен → Ақтау", callback_data="dir_janaozen_aktau")],
+            [InlineKeyboardButton(text="Жаңаөзен → Шетпе", callback_data="dir_janaozen_shetpe")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="back_main")]
+        ]
+    )
 
 async def show_driver_menu(message: types.Message, user_id: int):
     async with get_db() as db:

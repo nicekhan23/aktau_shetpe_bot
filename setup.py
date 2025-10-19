@@ -10,35 +10,35 @@ import os
 DATABASE_FILE = 'taxi_bot.db'
 
 def init_database():
-    """Дерекқорды инициализациялау"""
+    """Дерекқорды инициализациялау - СОВМЕСТИМО С bot.py"""
     conn = sqlite3.connect(DATABASE_FILE)
-    
-    conn = sqlite3.connect('taxi_bot.db')
     c = conn.cursor()
     
-    # Жүргізушілер кестесі (departure_date қосылды!)
+    # Водители (из migration_v1 + v4)
     c.execute('''CREATE TABLE IF NOT EXISTS drivers
                  (user_id INTEGER PRIMARY KEY,
                   full_name TEXT NOT NULL,
+                  phone TEXT NOT NULL,
                   car_number TEXT NOT NULL,
                   car_model TEXT NOT NULL,
                   total_seats INTEGER NOT NULL,
                   direction TEXT NOT NULL,
-                  departure_date TEXT NOT NULL,
-                  departure_time TEXT NOT NULL,
                   queue_position INTEGER NOT NULL,
                   is_active INTEGER DEFAULT 0,
-                  payment_status INTEGER DEFAULT 0,
-                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+                  is_verified INTEGER DEFAULT 0,
+                  verification_code TEXT,
+                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                  avg_rating REAL DEFAULT 0,
+                  rating_count INTEGER DEFAULT 0,
+                  occupied_seats INTEGER DEFAULT 0,
+                  is_on_trip INTEGER DEFAULT 0)''')
     
-    # Клиенттер кестесі (ИСПРАВЛЕННАЯ ВЕРСИЯ)
+    # Клиенты (из migration_v1 + v2 + v5 + v6 + НОВЫЕ ГОРОДА)
     c.execute('''CREATE TABLE IF NOT EXISTS clients
                  (user_id INTEGER PRIMARY KEY,
                   full_name TEXT NOT NULL,
                   phone TEXT NOT NULL,
                   direction TEXT NOT NULL,
-                  from_city TEXT NOT NULL,
-                  to_city TEXT NOT NULL,
                   queue_position INTEGER NOT NULL,
                   passengers_count INTEGER DEFAULT 1,
                   pickup_location TEXT NOT NULL,
@@ -47,57 +47,80 @@ def init_database():
                   verification_code TEXT,
                   status TEXT DEFAULT 'waiting',
                   assigned_driver_id INTEGER,
+                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                   avg_rating REAL DEFAULT 0,
                   rating_count INTEGER DEFAULT 0,
-                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+                  cancellation_count INTEGER DEFAULT 0,
+                  order_for TEXT DEFAULT 'self',
+                  order_number INTEGER DEFAULT 1,
+                  parent_user_id INTEGER,
+                  from_city TEXT NOT NULL,
+                  to_city TEXT NOT NULL)''')
     
-    # Брондар кестесі (departure_date қосылды!)
-    c.execute('''CREATE TABLE IF NOT EXISTS bookings
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  client_id INTEGER NOT NULL,
-                  driver_id INTEGER NOT NULL,
-                  direction TEXT NOT NULL,
-                  departure_date TEXT NOT NULL,
-                  pickup_location TEXT NOT NULL,
-                  dropoff_location TEXT NOT NULL,
-                  booking_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                  status TEXT DEFAULT 'active',
-                  FOREIGN KEY (client_id) REFERENCES clients(id),
-                  FOREIGN KEY (driver_id) REFERENCES drivers(user_id))''')
-    
-    # Админдер кестесі
+    # Админы
     c.execute('''CREATE TABLE IF NOT EXISTS admins
                  (user_id INTEGER PRIMARY KEY,
                   added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     
-    # Төлемдер тарихы кестесі
-    c.execute('''CREATE TABLE IF NOT EXISTS payment_history
+    # Рейтинги (из migration_v2)
+    c.execute('''CREATE TABLE IF NOT EXISTS ratings
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  driver_id INTEGER NOT NULL,
-                  amount INTEGER NOT NULL,
-                  payment_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                  approved_by INTEGER,
-                  FOREIGN KEY (driver_id) REFERENCES drivers(user_id),
-                  FOREIGN KEY (approved_by) REFERENCES admins(user_id))''')
+                  from_user_id INTEGER,
+                  to_user_id INTEGER,
+                  user_type TEXT,
+                  trip_id INTEGER,
+                  rating INTEGER CHECK(rating >= 1 AND rating <= 5),
+                  review TEXT,
+                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     
-    # Хабарламалар журналы
-    c.execute('''CREATE TABLE IF NOT EXISTS notification_log
+    # Поездки (из migration_v3)
+    c.execute('''CREATE TABLE IF NOT EXISTS trips
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  user_id INTEGER NOT NULL,
-                  message TEXT NOT NULL,
-                  sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+                  driver_id INTEGER,
+                  client_id INTEGER,
+                  direction TEXT,
+                  pickup_location TEXT,
+                  dropoff_location TEXT,
+                  passengers_count INTEGER,
+                  status TEXT,
+                  driver_arrived_at TIMESTAMP,
+                  trip_started_at TIMESTAMP,
+                  trip_completed_at TIMESTAMP,
+                  cancelled_by TEXT,
+                  cancelled_at TIMESTAMP,
+                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    
+    # Логи действий (из migration_v3)
+    c.execute('''CREATE TABLE IF NOT EXISTS actions_log
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  user_id INTEGER,
+                  action TEXT,
+                  details TEXT,
+                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    
+    # Черный список (из migration_v5)
+    c.execute('''CREATE TABLE IF NOT EXISTS blacklist
+                 (user_id INTEGER PRIMARY KEY,
+                  reason TEXT,
+                  cancellation_count INTEGER DEFAULT 0,
+                  banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    
+    # Устанавливаем версию БД на 6 (все миграции применены)
+    c.execute("PRAGMA user_version = 6")
     
     conn.commit()
     conn.close()
     
     print("✅ Дерекқор сәтті құрылды!")
     print("\n📋 Құрылған кестелер:")
-    print("  • drivers (departure_date бағанымен)")
-    print("  • clients")
-    print("  • bookings (departure_date бағанымен)")
+    print("  • drivers (с occupied_seats, avg_rating)")
+    print("  • clients (с from_city, to_city, status, cancellation_count)")
     print("  • admins")
-    print("  • payment_history")
-    print("  • notification_log")
+    print("  • ratings")
+    print("  • trips")
+    print("  • actions_log")
+    print("  • blacklist")
+    print("\n✅ DB Version: 6 (все миграции применены)")
 
 def migrate_existing_database():
     """Бар дерекқорды жаңарту (departure_date қосу)"""
