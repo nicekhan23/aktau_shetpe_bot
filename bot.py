@@ -14,6 +14,8 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from contextlib import asynccontextmanager
+from twilio.rest import Client
+from twilio.base.exceptions import TwilioRestException
 import random
 import string
 
@@ -86,94 +88,133 @@ def generate_verification_code() -> str:
     return ''.join(random.choices(string.digits, k=4))
 
 async def send_sms(phone: str, message: str) -> bool:
-    """Отправка SMS через Mobizon.kz (исправленная версия)"""
-    api_key = os.getenv("MOBIZON_API_KEY", "")
-    sender_name = os.getenv("MOBIZON_SENDER", "")
+    """Отправка SMS через Twilio"""
+    account_sid = os.getenv("TWILIO_ACCOUNT_SID", "")
+    auth_token = os.getenv("TWILIO_AUTH_TOKEN", "")
+    twilio_number = os.getenv("TWILIO_PHONE_NUMBER", "")
+    dev_mode = os.getenv("DEV_MODE", "false").lower() == "true"
     
-    if not api_key:
+    # Режим разработки
+    if dev_mode or not account_sid or not auth_token or not twilio_number:
         logger.warning(f"[TEST MODE] SMS для {phone}: {message}")
         return True
     
-    # ИСПРАВЛЕНО: Правильная очистка номера
+    # Очистка номера
     phone_clean = phone.strip()
-    
-    # Убираем все символы кроме цифр
-    phone_clean = ''.join(filter(str.isdigit, phone_clean))
-    
-    # Проверяем формат
-    if not phone_clean.startswith('7'):
-        if phone_clean.startswith('8'):
-            phone_clean = '7' + phone_clean[1:]  # 8xxx -> 7xxx
+    if not phone_clean.startswith('+'):
+        # Добавляем + если его нет
+        if phone_clean.startswith('7') or phone_clean.startswith('8'):
+            phone_clean = '+' + phone_clean.replace('8', '7', 1)
         else:
-            phone_clean = '7' + phone_clean  # xxx -> 7xxx
+            phone_clean = '+7' + phone_clean
     
-    # Проверка длины (должно быть 11 цифр: 7XXXXXXXXXX)
-    if len(phone_clean) != 11:
+    # Проверка длины (должно быть +7XXXXXXXXXX = 12 символов)
+    if len(phone_clean) != 12:
         logger.error(f"❌ Неверная длина номера: {phone_clean} (длина: {len(phone_clean)})")
         return False
     
-    logger.info(f"📱 Отправка SMS на {phone_clean} (original: {phone})")
-    
-    # URL API Mobizon
-    url = "https://api.mobizon.kz/service/message/sendsmsmessage"
-    
-    params = {
-        "apiKey": api_key,
-        "recipient": phone_clean,
-        "text": message,
-        "from": sender_name
-    }
+    logger.info(f"📱 Отправка SMS через Twilio на {phone_clean}")
     
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params, timeout=15) as response:
-                result = await response.json()
-                
-                logger.info(f"🔍 Mobizon response: {result}")
-                
-                # Проверяем ответ
-                if result.get("code") == 0:  # 0 = успех
-                    message_id = result.get("data", {}).get("messageId", "unknown")
-                    logger.info(f"✅ SMS отправлено на {phone_clean} (ID: {message_id})")
-                    return True
-                else:
-                    error_msg = result.get("message", "Unknown error")
-                    error_code = result.get("code", -1)
-                    logger.error(f"❌ Ошибка Mobizon ({error_code}): {error_msg}")
-                    logger.error(f"   Параметры: recipient={phone_clean}, from={sender_name}")
-                    return False
-                    
-    except asyncio.TimeoutError:
-        logger.error(f"⏱️ Таймаут при отправке SMS на {phone_clean}")
+        # Создаём клиент Twilio
+        client = Client(account_sid, auth_token)
+        
+        # Отправляем SMS
+        sms = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: client.messages.create(
+                body=message,
+                from_=twilio_number,
+                to=phone_clean
+            )
+        )
+        
+        logger.info(f"✅ SMS отправлено на {phone_clean} (SID: {sms.sid})")
+        logger.info(f"   Статус: {sms.status}")
+        return True
+        
+    except TwilioRestException as e:
+        logger.error(f"❌ Twilio error ({e.code}): {e.msg}")
+        
+        # Расшифровка популярных ошибок
+        error_messages = {
+            21211: "Неверный номер телефона 'To'",
+            21212: "Неверный номер телефона 'From' (проверь TWILIO_PHONE_NUMBER)",
+            21608: "Этот номер не верифицирован (для trial аккаунта)",
+            21606: "Номер не может получать SMS",
+            21614: "Не хватает средств на балансе"
+        }
+        
+        if e.code in error_messages:
+            logger.error(f"   Причина: {error_messages[e.code]}")
+        
         return False
+        
     except Exception as e:
-        logger.error(f"💥 Ошибка отправки SMS: {e}")
+        logger.error(f"💥 Неожиданная ошибка отправки SMS: {e}")
         return False
 
-async def check_mobizon_balance() -> float:
-    """Проверка баланса Mobizon"""
-    api_key = os.getenv("MOBIZON_API_KEY", "")
+
+async def check_twilio_balance() -> dict:
+    """Проверка баланса Twilio"""
+    account_sid = os.getenv("TWILIO_ACCOUNT_SID", "")
+    auth_token = os.getenv("TWILIO_AUTH_TOKEN", "")
     
-    if not api_key:
-        return 0.0
-    
-    url = "https://api.mobizon.kz/service/user/getownbalance"
-    params = {"apiKey": api_key}
+    if not account_sid or not auth_token:
+        return {"balance": 0, "currency": "USD", "type": "unknown"}
     
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params, timeout=10) as response:
-                result = await response.json()
-                
-                if result.get("code") == 0:
-                    balance = result.get("data", {}).get("balance", 0)
-                    currency = result.get("data", {}).get("currency", "KZT")
-                    logger.info(f"💰 Баланс Mobizon: {balance} {currency}")
-                    return float(balance)
+        client = Client(account_sid, auth_token)
+        
+        account = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: client.api.accounts(account_sid).fetch()
+        )
+        
+        balance = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: client.balance.fetch()
+        )
+        
+        account_type = "Trial" if account.status == "active" and account.type == "Trial" else "Paid"
+        
+        logger.info(f"💰 Баланс Twilio: {balance.balance} {balance.currency} ({account_type})")
+        
+        return {
+            "balance": float(balance.balance),
+            "currency": balance.currency,
+            "type": account_type,
+            "status": account.status
+        }
+        
     except Exception as e:
-        logger.error(f"Ошибка проверки баланса: {e}")
+        logger.error(f"Ошибка проверки баланса Twilio: {e}")
+        return {"balance": 0, "currency": "USD", "type": "unknown"}
+
+
+async def get_twilio_phone_number() -> str:
+    """Получить номер Twilio"""
+    account_sid = os.getenv("TWILIO_ACCOUNT_SID", "")
+    auth_token = os.getenv("TWILIO_AUTH_TOKEN", "")
     
-    return 0.0
+    if not account_sid or not auth_token:
+        return "Not configured"
+    
+    try:
+        client = Client(account_sid, auth_token)
+        
+        numbers = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: client.incoming_phone_numbers.list(limit=1)
+        )
+        
+        if numbers:
+            return numbers[0].phone_number
+        return "No phone number"
+        
+    except Exception as e:
+        logger.error(f"Ошибка получения номера Twilio: {e}")
+        return "Error"
 
 # ==================== БД И МИГРАЦИИ ====================
 
@@ -2330,234 +2371,74 @@ async def reset_cancellation(message: types.Message):
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
         
-@dp.message(Command("testsms"))
-async def test_sms_command(message: types.Message):
-    """Команда для теста SMS (только для админов)"""
+@dp.message(Command("twiliocheck"))
+async def twilio_check_command(message: types.Message):
+    """Проверка конфигурации Twilio (только для админов)"""
     if not await is_admin(message.from_user.id):
         await message.answer("❌ Нет доступа")
         return
     
-    # Получаем номер из команды или используем свой
-    parts = message.text.split()
-    phone = parts[1] if len(parts) > 1 else message.from_user.username
+    account_sid = os.getenv("TWILIO_ACCOUNT_SID", "")
+    auth_token = os.getenv("TWILIO_AUTH_TOKEN", "")
+    twilio_number = os.getenv("TWILIO_PHONE_NUMBER", "")
+    dev_mode = os.getenv("DEV_MODE", "false")
     
-    test_message = f"Тест от TaxiBot: {datetime.now().strftime('%H:%M:%S')}"
+    msg = "🔍 <b>Конфигурация Twilio:</b>\n\n"
     
-    await message.answer(f"📤 Отправляю SMS на {phone}...")
-    
-    success = await send_sms(phone, test_message)
-    
-    if success:
-        await message.answer("✅ SMS отправлено успешно!")
+    if not account_sid:
+        msg += "❌ TWILIO_ACCOUNT_SID не установлен\n"
     else:
-        await message.answer("❌ Ошибка отправки SMS")
-        
-@dp.message(Command("debugsms"))
-async def debug_sms_command(message: types.Message):
-    """Отладка SMS-отправки (только для админов)"""
-    if not await is_admin(message.from_user.id):
-        await message.answer("❌ Нет доступа")
-        return
+        masked_sid = account_sid[:6] + "..." + account_sid[-4:]
+        msg += f"✅ Account SID: <code>{masked_sid}</code>\n"
     
-    parts = message.text.split()
-    if len(parts) < 2:
-        await message.answer(
-            "Используйте: /debugsms +77001234567\n\n"
-            "Примеры правильных форматов:\n"
-            "• +77001234567\n"
-            "• 77001234567\n"
-            "• 87001234567"
-        )
-        return
-    
-    phone = parts[1]
-    
-    # Показываем процесс очистки
-    phone_clean = ''.join(filter(str.isdigit, phone.strip()))
-    
-    if not phone_clean.startswith('7'):
-        if phone_clean.startswith('8'):
-            phone_clean = '7' + phone_clean[1:]
-        else:
-            phone_clean = '7' + phone_clean
-    
-    await message.answer(
-        f"🔍 <b>Отладка номера:</b>\n\n"
-        f"Входящий: <code>{phone}</code>\n"
-        f"Очищенный: <code>{phone_clean}</code>\n"
-        f"Длина: {len(phone_clean)} (должно быть 11)\n\n"
-        f"{'✅ Формат правильный' if len(phone_clean) == 11 else '❌ Неверная длина!'}\n\n"
-        f"Отправляю тестовое SMS...",
-        parse_mode="HTML"
-    )
-    
-    test_message = f"Тест от TaxiBot: {datetime.now().strftime('%H:%M:%S')}"
-    success = await send_sms(phone, test_message)
-    
-    if success:
-        await message.answer("✅ SMS успешно отправлено!")
+    if not auth_token:
+        msg += "❌ TWILIO_AUTH_TOKEN не установлен\n"
     else:
-        await message.answer(
-            "❌ Ошибка отправки\n\n"
-            "Проверь логи выше для деталей"
-        )
-        
-@dp.message(Command("checkconfig"))
-async def check_config_command(message: types.Message):
-    """Проверка конфигурации Mobizon (только для админов)"""
-    if not await is_admin(message.from_user.id):
-        await message.answer("❌ Нет доступа")
-        return
+        msg += f"✅ Auth Token: <code>***...{auth_token[-4:]}</code>\n"
     
-    api_key = os.getenv("MOBIZON_API_KEY", "")
-    sender = os.getenv("MOBIZON_SENDER", "")
-    
-    if not api_key:
-        await message.answer("❌ MOBIZON_API_KEY не установлен в .env!")
-        return
-    
-    # Маскируем ключ
-    masked_key = api_key[:6] + "..." + api_key[-4:] if len(api_key) > 10 else "***"
-    
-    msg = f"🔍 <b>Конфигурация Mobizon:</b>\n\n"
-    msg += f"API Key: <code>{masked_key}</code>\n"
-    msg += f"Sender: <code>{sender}</code>\n"
-    msg += f"Длина ключа: {len(api_key)}\n\n"
-    
-    # Проверка имени отправителя
-    if len(sender) > 11:
-        msg += "⚠️ ВНИМАНИЕ: Имя отправителя больше 11 символов!\n"
-        msg += f"   Текущее: {len(sender)} символов\n"
-        msg += f"   Обрежется до: <code>{sender[:11]}</code>\n\n"
+    if not twilio_number:
+        msg += "❌ TWILIO_PHONE_NUMBER не установлен\n"
     else:
-        msg += f"✅ Имя отправителя: OK ({len(sender)} символов)\n\n"
+        msg += f"✅ Phone: <code>{twilio_number}</code>\n"
     
-    # Проверяем доступ к API
-    msg += "Проверяю подключение к API...\n"
+    msg += f"\n🔧 Режим разработки: {'✅ Включён' if dev_mode == 'true' else '❌ Выключен'}\n"
     
     await message.answer(msg, parse_mode="HTML")
     
-    # Тест API
-    url = "https://api.mobizon.kz/service/user/getownbalance"
-    params = {"apiKey": api_key}
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params, timeout=10) as response:
-                result = await response.json()
-                
-                if result.get("code") == 0:
-                    balance = result.get("data", {}).get("balance", 0)
-                    currency = result.get("data", {}).get("currency", "KZT")
-                    
-                    await message.answer(
-                        f"✅ <b>API работает!</b>\n\n"
-                        f"💰 Баланс: {balance} {currency}\n\n"
-                        f"Можно отправлять SMS",
-                        parse_mode="HTML"
-                    )
-                else:
-                    error_msg = result.get("message", "Unknown")
-                    await message.answer(
-                        f"❌ <b>Ошибка API:</b>\n\n"
-                        f"Код: {result.get('code')}\n"
-                        f"Сообщение: {error_msg}",
-                        parse_mode="HTML"
-                    )
-    except Exception as e:
-        await message.answer(f"❌ Ошибка подключения: {e}")
+    # Проверяем подключение
+    if account_sid and auth_token:
+        await message.answer("🔄 Проверяю подключение к Twilio...")
         
-@dp.message(Command("checkdirections"))
-async def check_directions_command(message: types.Message):
-    """Проверка доступных направлений отправки SMS"""
-    if not await is_admin(message.from_user.id):
-        await message.answer("❌ Нет доступа")
-        return
-    
-    api_key = os.getenv("MOBIZON_API_KEY", "")
-    
-    if not api_key:
-        await message.answer("❌ MOBIZON_API_KEY не установлен!")
-        return
-    
-    await message.answer("🔍 Проверяю настройки аккаунта...")
-    
-    # Получаем информацию о балансе и настройках
-    url = "https://api.mobizon.kz/service/user/getownbalance"
-    params = {"apiKey": api_key, "output": "json"}
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params, timeout=10) as response:
-                result = await response.json()
-                
-                if result.get("code") == 0:
-                    data = result.get("data", {})
-                    
-                    msg = "📊 <b>Информация об аккаунте:</b>\n\n"
-                    msg += f"💰 Баланс: {data.get('balance', 0)} {data.get('currency', 'KZT')}\n"
-                    msg += f"📧 Email: {data.get('email', 'N/A')}\n\n"
-                    
-                    msg += "📱 <b>Тестирование направлений:</b>\n\n"
-                    
-                    # Тестируем разные коды операторов Казахстана
-                    test_numbers = {
-                        "Beeline KZ": "77765224550",
-                        "Kcell": "77015224550",
-                        "Activ (Казахтелеком)": "77755224550",
-                        "Tele2 KZ": "77075224550"
-                    }
-                    
-                    await message.answer(msg, parse_mode="HTML")
-                    
-                    # Проверяем каждое направление
-                    for operator, test_num in test_numbers.items():
-                        check_url = "https://api.mobizon.kz/service/message/sendsmsmessage"
-                        check_params = {
-                            "apiKey": api_key,
-                            "recipient": test_num,
-                            "text": "Test",
-                            "dryRun": "1"  # Тестовый режим - не отправляет реально
-                        }
-                        
-                        try:
-                            async with session.get(check_url, params=check_params, timeout=10) as resp:
-                                check_result = await resp.json()
-                                
-                                if check_result.get("code") == 0:
-                                    status = f"✅ {operator}: Разрешено"
-                                else:
-                                    error = check_result.get("data", {}).get("recipient", "Unknown")
-                                    status = f"❌ {operator}: {error}"
-                                
-                                await message.answer(status)
-                                await asyncio.sleep(0.5)
-                        except:
-                            await message.answer(f"⚠️ {operator}: Ошибка проверки")
-                    
-                    await message.answer(
-                        "\n💡 <b>Что делать если все заблокировано:</b>\n\n"
-                        "1. Зайди на mobizon.kz\n"
-                        "2. Настройки → API → Ограничения\n"
-                        "3. Включи отправку в Казахстан\n"
-                        "4. Или обратись в поддержку:\n"
-                        "   support@mobizon.kz\n"
-                        "   +7 (727) 311-11-11",
-                        parse_mode="HTML"
-                    )
-                else:
-                    await message.answer(
-                        f"❌ Ошибка API:\n"
-                        f"Код: {result.get('code')}\n"
-                        f"Сообщение: {result.get('message', 'Unknown')}"
-                    )
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
+        balance_info = await check_twilio_balance()
+        
+        if balance_info['type'] != 'unknown':
+            balance_msg = f"💰 <b>Баланс Twilio:</b>\n\n"
+            balance_msg += f"Сумма: {balance_info['balance']} {balance_info['currency']}\n"
+            balance_msg += f"Тип аккаунта: {balance_info['type']}\n"
+            balance_msg += f"Статус: {balance_info['status']}\n\n"
+            
+            if balance_info['type'] == 'Trial':
+                balance_msg += "⚠️ <b>Trial аккаунт</b>\n"
+                balance_msg += "SMS можно отправлять только на верифицированные номера!\n\n"
+                balance_msg += "Чтобы верифицировать номер:\n"
+                balance_msg += "1. console.twilio.com\n"
+                balance_msg += "2. Phone Numbers → Verified Caller IDs\n"
+                balance_msg += "3. Add a new number"
+            elif float(balance_info['balance']) < 1:
+                balance_msg += "⚠️ Низкий баланс! Пополните счёт"
+            
+            await message.answer(balance_msg, parse_mode="HTML")
+            
+            # Получаем номер телефона
+            phone = await get_twilio_phone_number()
+            await message.answer(f"📱 Ваш Twilio номер: <code>{phone}</code>", parse_mode="HTML")
+        else:
+            await message.answer("❌ Не удалось подключиться к Twilio")
 
 
-@dp.message(Command("testoperators"))
-async def test_operators_command(message: types.Message):
-    """Тест отправки на разные операторы Казахстана"""
+@dp.message(Command("twiliotest"))
+async def twilio_test_command(message: types.Message):
+    """Тест отправки SMS через Twilio (только для админов)"""
     if not await is_admin(message.from_user.id):
         await message.answer("❌ Нет доступа")
         return
@@ -2565,98 +2446,77 @@ async def test_operators_command(message: types.Message):
     parts = message.text.split()
     if len(parts) < 2:
         await message.answer(
-            "Используйте: /testoperators +77XXXXXXXXX\n\n"
-            "Операторы Казахстана:\n"
-            "• Kcell: +7 700-705, +7 771, +7 777-778\n"
-            "• Beeline: +7 776\n"
-            "• Activ: +7 775\n"
-            "• Tele2: +7 707"
+            "Используйте: /twiliotest +77001234567\n\n"
+            "⚠️ Для Trial аккаунта номер должен быть верифицирован!"
         )
         return
     
     phone = parts[1]
-    phone_clean = ''.join(filter(str.isdigit, phone.strip()))
     
-    if not phone_clean.startswith('7'):
-        phone_clean = '7' + phone_clean
+    await message.answer(f"📤 Отправляю тестовое SMS на {phone}...")
     
-    if len(phone_clean) != 11:
-        await message.answer(f"❌ Неверная длина номера: {len(phone_clean)} (должно быть 11)")
-        return
+    test_message = f"🚖 Тест от TaxiBot\nВремя: {datetime.now().strftime('%H:%M:%S')}"
     
-    # Определяем оператора
-    prefix = phone_clean[1:4]  # Берём 3 цифры после 7
-    
-    operators = {
-        '700': 'Kcell', '701': 'Kcell', '702': 'Kcell', '705': 'Kcell',
-        '771': 'Kcell', '777': 'Kcell', '778': 'Kcell',
-        '776': 'Beeline KZ',
-        '775': 'Activ (Казахтелеком)',
-        '707': 'Tele2 KZ'
-    }
-    
-    operator = operators.get(prefix, 'Неизвестный оператор')
-    
-    await message.answer(
-        f"📱 <b>Анализ номера:</b>\n\n"
-        f"Номер: <code>{phone_clean}</code>\n"
-        f"Оператор: {operator}\n"
-        f"Префикс: {prefix}\n\n"
-        f"Отправляю тестовое SMS...",
-        parse_mode="HTML"
-    )
-    
-    test_msg = f"Test от TaxiBot: {datetime.now().strftime('%H:%M')}"
-    success = await send_sms(phone, test_msg)
+    success = await send_sms(phone, test_message)
     
     if success:
-        await message.answer("✅ SMS отправлено!")
-    else:
         await message.answer(
-            "❌ Не удалось отправить\n\n"
-            "Возможно этот оператор заблокирован в настройках аккаунта"
-        )
-
-@dp.message(Command("balance"))
-async def check_balance_command(message: types.Message):
-    """Проверка баланса Mobizon (только для админов)"""
-    if not await is_admin(message.from_user.id):
-        await message.answer("❌ Нет доступа")
-        return
-    
-    await message.answer("🔄 Проверяю баланс...")
-    
-    balance = await check_mobizon_balance()
-    
-    if balance > 0:
-        await message.answer(
-            f"💰 <b>Баланс Mobizon:</b>\n\n"
-            f"{balance} тенге\n\n"
-            f"{'✅ Баланс в норме' if balance > 100 else '⚠️ Низкий баланс! Пополните счёт'}",
+            "✅ <b>SMS успешно отправлено!</b>\n\n"
+            "Проверьте телефон",
             parse_mode="HTML"
         )
     else:
         await message.answer(
-            "❌ Не удалось получить баланс\n\n"
-            "Проверьте:\n"
-            "• API-ключ в .env\n"
-            "• Интернет-соединение"
+            "❌ <b>Ошибка отправки</b>\n\n"
+            "Проверьте логи выше для деталей.\n\n"
+            "Частые причины:\n"
+            "• Номер не верифицирован (Trial)\n"
+            "• Неверный формат номера\n"
+            "• Недостаточно средств\n"
+            "• Неверные учётные данные",
+            parse_mode="HTML"
         )
+
+
+@dp.message(Command("verifynumber"))
+async def verify_number_command(message: types.Message):
+    """Инструкция по верификации номера для Trial"""
+    if not await is_admin(message.from_user.id):
+        await message.answer("❌ Нет доступа")
+        return
+    
+    await message.answer(
+        "📱 <b>Верификация номера (Trial аккаунт)</b>\n\n"
+        "Trial аккаунт Twilio может отправлять SMS только на верифицированные номера.\n\n"
+        "<b>Как верифицировать номер:</b>\n\n"
+        "1. Зайди на https://console.twilio.com\n"
+        "2. Phone Numbers → Verified Caller IDs\n"
+        "3. Нажми '+' (Add a new number)\n"
+        "4. Введи номер в формате +77001234567\n"
+        "5. Получи SMS с кодом\n"
+        "6. Введи код\n\n"
+        "✅ После этого можно отправлять SMS на этот номер!\n\n"
+        "💰 <b>Чтобы отправлять всем:</b>\n"
+        "Пополни баланс минимум на $20 - аккаунт станет полным",
+        parse_mode="HTML"
+    )
 
 
 @dp.message(Command("smsinfo"))
 async def sms_info_command(message: types.Message):
     """Информация об SMS-сервисе"""
     await message.answer(
-        "📱 <b>SMS-сервис Mobizon.kz</b>\n\n"
+        "📱 <b>SMS-сервис: Twilio</b>\n\n"
         "✅ Статус: Активен\n\n"
         "<b>Команды для админов:</b>\n"
-        "/testsms +77001234567 - отправить тест\n"
-        "/balance - проверить баланс\n\n"
-        "<b>Тарифы:</b>\n"
-        "• Казахстан: ~3 тенге/SMS\n"
-        "• Россия/СНГ: ~5 тенге/SMS\n\n"
-        "📞 Поддержка: support@mobizon.kz",
+        "/twiliocheck - проверить конфигурацию\n"
+        "/twiliotest +77001234567 - отправить тест\n"
+        "/verifynumber - как верифицировать номер\n\n"
+        "<b>Тарифы Twilio:</b>\n"
+        "• Казахстан: ~$0.07/SMS (~35₽)\n"
+        "• Россия: ~$0.02/SMS (~10₽)\n"
+        "• Входящие SMS: $0.0075\n\n"
+        "📞 Поддержка: https://support.twilio.com",
         parse_mode="HTML"
     )
 
