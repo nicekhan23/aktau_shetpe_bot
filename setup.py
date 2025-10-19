@@ -31,12 +31,24 @@ def init_database():
                   payment_status INTEGER DEFAULT 0,
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     
-    # Клиенттер кестесі
+    # Клиенттер кестесі (ИСПРАВЛЕННАЯ ВЕРСИЯ)
     c.execute('''CREATE TABLE IF NOT EXISTS clients
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  user_id INTEGER UNIQUE NOT NULL,
-                  full_name TEXT,
-                  phone TEXT,
+                 (user_id INTEGER PRIMARY KEY,
+                  full_name TEXT NOT NULL,
+                  phone TEXT NOT NULL,
+                  direction TEXT NOT NULL,
+                  from_city TEXT NOT NULL,
+                  to_city TEXT NOT NULL,
+                  queue_position INTEGER NOT NULL,
+                  passengers_count INTEGER DEFAULT 1,
+                  pickup_location TEXT NOT NULL,
+                  dropoff_location TEXT NOT NULL,
+                  is_verified INTEGER DEFAULT 0,
+                  verification_code TEXT,
+                  status TEXT DEFAULT 'waiting',
+                  assigned_driver_id INTEGER,
+                  avg_rating REAL DEFAULT 0,
+                  rating_count INTEGER DEFAULT 0,
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     
     # Брондар кестесі (departure_date қосылды!)
