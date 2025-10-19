@@ -86,16 +86,33 @@ def generate_verification_code() -> str:
     return ''.join(random.choices(string.digits, k=4))
 
 async def send_sms(phone: str, message: str) -> bool:
-    """Отправка SMS через Mobizon.kz (простой метод)"""
+    """Отправка SMS через Mobizon.kz (исправленная версия)"""
     api_key = os.getenv("MOBIZON_API_KEY", "")
-    sender_name = os.getenv("MOBIZON_SENDER", "InfoCentr")  # Дефолтное имя
+    sender_name = os.getenv("MOBIZON_SENDER", "")
     
     if not api_key:
         logger.warning(f"[TEST MODE] SMS для {phone}: {message}")
         return True
     
-    # Убираем '+' и пробелы
-    phone_clean = phone.replace('+', '').replace(' ', '')
+    # ИСПРАВЛЕНО: Правильная очистка номера
+    phone_clean = phone.strip()
+    
+    # Убираем все символы кроме цифр
+    phone_clean = ''.join(filter(str.isdigit, phone_clean))
+    
+    # Проверяем формат
+    if not phone_clean.startswith('7'):
+        if phone_clean.startswith('8'):
+            phone_clean = '7' + phone_clean[1:]  # 8xxx -> 7xxx
+        else:
+            phone_clean = '7' + phone_clean  # xxx -> 7xxx
+    
+    # Проверка длины (должно быть 11 цифр: 7XXXXXXXXXX)
+    if len(phone_clean) != 11:
+        logger.error(f"❌ Неверная длина номера: {phone_clean} (длина: {len(phone_clean)})")
+        return False
+    
+    logger.info(f"📱 Отправка SMS на {phone_clean} (original: {phone})")
     
     # URL API Mobizon
     url = "https://api.mobizon.kz/service/message/sendsmsmessage"
@@ -112,24 +129,51 @@ async def send_sms(phone: str, message: str) -> bool:
             async with session.get(url, params=params, timeout=15) as response:
                 result = await response.json()
                 
+                logger.info(f"🔍 Mobizon response: {result}")
+                
                 # Проверяем ответ
                 if result.get("code") == 0:  # 0 = успех
                     message_id = result.get("data", {}).get("messageId", "unknown")
-                    logger.info(f"✅ SMS отправлено на {phone} (ID: {message_id})")
+                    logger.info(f"✅ SMS отправлено на {phone_clean} (ID: {message_id})")
                     return True
                 else:
                     error_msg = result.get("message", "Unknown error")
                     error_code = result.get("code", -1)
                     logger.error(f"❌ Ошибка Mobizon ({error_code}): {error_msg}")
+                    logger.error(f"   Параметры: recipient={phone_clean}, from={sender_name}")
                     return False
                     
     except asyncio.TimeoutError:
-        logger.error(f"⏱️ Таймаут при отправке SMS на {phone}")
+        logger.error(f"⏱️ Таймаут при отправке SMS на {phone_clean}")
         return False
     except Exception as e:
         logger.error(f"💥 Ошибка отправки SMS: {e}")
         return False
 
+async def check_mobizon_balance() -> float:
+    """Проверка баланса Mobizon"""
+    api_key = os.getenv("MOBIZON_API_KEY", "")
+    
+    if not api_key:
+        return 0.0
+    
+    url = "https://api.mobizon.kz/service/user/getownbalance"
+    params = {"apiKey": api_key}
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, timeout=10) as response:
+                result = await response.json()
+                
+                if result.get("code") == 0:
+                    balance = result.get("data", {}).get("balance", 0)
+                    currency = result.get("data", {}).get("currency", "KZT")
+                    logger.info(f"💰 Баланс Mobizon: {balance} {currency}")
+                    return float(balance)
+    except Exception as e:
+        logger.error(f"Ошибка проверки баланса: {e}")
+    
+    return 0.0
 
 # ==================== БД И МИГРАЦИИ ====================
 
@@ -2285,6 +2329,186 @@ async def reset_cancellation(message: types.Message):
         await message.answer("❌ Неверный USER_ID")
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
+        
+@dp.message(Command("testsms"))
+async def test_sms_command(message: types.Message):
+    """Команда для теста SMS (только для админов)"""
+    if not await is_admin(message.from_user.id):
+        await message.answer("❌ Нет доступа")
+        return
+    
+    # Получаем номер из команды или используем свой
+    parts = message.text.split()
+    phone = parts[1] if len(parts) > 1 else message.from_user.username
+    
+    test_message = f"Тест от TaxiBot: {datetime.now().strftime('%H:%M:%S')}"
+    
+    await message.answer(f"📤 Отправляю SMS на {phone}...")
+    
+    success = await send_sms(phone, test_message)
+    
+    if success:
+        await message.answer("✅ SMS отправлено успешно!")
+    else:
+        await message.answer("❌ Ошибка отправки SMS")
+        
+@dp.message(Command("debugsms"))
+async def debug_sms_command(message: types.Message):
+    """Отладка SMS-отправки (только для админов)"""
+    if not await is_admin(message.from_user.id):
+        await message.answer("❌ Нет доступа")
+        return
+    
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer(
+            "Используйте: /debugsms +77001234567\n\n"
+            "Примеры правильных форматов:\n"
+            "• +77001234567\n"
+            "• 77001234567\n"
+            "• 87001234567"
+        )
+        return
+    
+    phone = parts[1]
+    
+    # Показываем процесс очистки
+    phone_clean = ''.join(filter(str.isdigit, phone.strip()))
+    
+    if not phone_clean.startswith('7'):
+        if phone_clean.startswith('8'):
+            phone_clean = '7' + phone_clean[1:]
+        else:
+            phone_clean = '7' + phone_clean
+    
+    await message.answer(
+        f"🔍 <b>Отладка номера:</b>\n\n"
+        f"Входящий: <code>{phone}</code>\n"
+        f"Очищенный: <code>{phone_clean}</code>\n"
+        f"Длина: {len(phone_clean)} (должно быть 11)\n\n"
+        f"{'✅ Формат правильный' if len(phone_clean) == 11 else '❌ Неверная длина!'}\n\n"
+        f"Отправляю тестовое SMS...",
+        parse_mode="HTML"
+    )
+    
+    test_message = f"Тест от TaxiBot: {datetime.now().strftime('%H:%M:%S')}"
+    success = await send_sms(phone, test_message)
+    
+    if success:
+        await message.answer("✅ SMS успешно отправлено!")
+    else:
+        await message.answer(
+            "❌ Ошибка отправки\n\n"
+            "Проверь логи выше для деталей"
+        )
+        
+@dp.message(Command("checkconfig"))
+async def check_config_command(message: types.Message):
+    """Проверка конфигурации Mobizon (только для админов)"""
+    if not await is_admin(message.from_user.id):
+        await message.answer("❌ Нет доступа")
+        return
+    
+    api_key = os.getenv("MOBIZON_API_KEY", "")
+    sender = os.getenv("MOBIZON_SENDER", "")
+    
+    if not api_key:
+        await message.answer("❌ MOBIZON_API_KEY не установлен в .env!")
+        return
+    
+    # Маскируем ключ
+    masked_key = api_key[:6] + "..." + api_key[-4:] if len(api_key) > 10 else "***"
+    
+    msg = f"🔍 <b>Конфигурация Mobizon:</b>\n\n"
+    msg += f"API Key: <code>{masked_key}</code>\n"
+    msg += f"Sender: <code>{sender}</code>\n"
+    msg += f"Длина ключа: {len(api_key)}\n\n"
+    
+    # Проверка имени отправителя
+    if len(sender) > 11:
+        msg += "⚠️ ВНИМАНИЕ: Имя отправителя больше 11 символов!\n"
+        msg += f"   Текущее: {len(sender)} символов\n"
+        msg += f"   Обрежется до: <code>{sender[:11]}</code>\n\n"
+    else:
+        msg += f"✅ Имя отправителя: OK ({len(sender)} символов)\n\n"
+    
+    # Проверяем доступ к API
+    msg += "Проверяю подключение к API...\n"
+    
+    await message.answer(msg, parse_mode="HTML")
+    
+    # Тест API
+    url = "https://api.mobizon.kz/service/user/getownbalance"
+    params = {"apiKey": api_key}
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, timeout=10) as response:
+                result = await response.json()
+                
+                if result.get("code") == 0:
+                    balance = result.get("data", {}).get("balance", 0)
+                    currency = result.get("data", {}).get("currency", "KZT")
+                    
+                    await message.answer(
+                        f"✅ <b>API работает!</b>\n\n"
+                        f"💰 Баланс: {balance} {currency}\n\n"
+                        f"Можно отправлять SMS",
+                        parse_mode="HTML"
+                    )
+                else:
+                    error_msg = result.get("message", "Unknown")
+                    await message.answer(
+                        f"❌ <b>Ошибка API:</b>\n\n"
+                        f"Код: {result.get('code')}\n"
+                        f"Сообщение: {error_msg}",
+                        parse_mode="HTML"
+                    )
+    except Exception as e:
+        await message.answer(f"❌ Ошибка подключения: {e}")
+
+@dp.message(Command("balance"))
+async def check_balance_command(message: types.Message):
+    """Проверка баланса Mobizon (только для админов)"""
+    if not await is_admin(message.from_user.id):
+        await message.answer("❌ Нет доступа")
+        return
+    
+    await message.answer("🔄 Проверяю баланс...")
+    
+    balance = await check_mobizon_balance()
+    
+    if balance > 0:
+        await message.answer(
+            f"💰 <b>Баланс Mobizon:</b>\n\n"
+            f"{balance} тенге\n\n"
+            f"{'✅ Баланс в норме' if balance > 100 else '⚠️ Низкий баланс! Пополните счёт'}",
+            parse_mode="HTML"
+        )
+    else:
+        await message.answer(
+            "❌ Не удалось получить баланс\n\n"
+            "Проверьте:\n"
+            "• API-ключ в .env\n"
+            "• Интернет-соединение"
+        )
+
+
+@dp.message(Command("smsinfo"))
+async def sms_info_command(message: types.Message):
+    """Информация об SMS-сервисе"""
+    await message.answer(
+        "📱 <b>SMS-сервис Mobizon.kz</b>\n\n"
+        "✅ Статус: Активен\n\n"
+        "<b>Команды для админов:</b>\n"
+        "/testsms +77001234567 - отправить тест\n"
+        "/balance - проверить баланс\n\n"
+        "<b>Тарифы:</b>\n"
+        "• Казахстан: ~3 тенге/SMS\n"
+        "• Россия/СНГ: ~5 тенге/SMS\n\n"
+        "📞 Поддержка: support@mobizon.kz",
+        parse_mode="HTML"
+    )
 
 # ==================== СТАРТ ====================
 
