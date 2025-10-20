@@ -1390,6 +1390,7 @@ async def client_dropoff(message: types.Message, state: FSMContext):
 async def order_for_self(callback: types.CallbackQuery, state: FSMContext):
     """Заказ для себя"""
     await state.update_data(order_for="Для себя")
+    await callback.answer()  # ДОБАВЛЕНО
     await finalize_order(callback, state)
 
 @dp.callback_query(ClientOrder.order_for, F.data == "order_for_other")
@@ -1399,8 +1400,9 @@ async def order_for_other(callback: types.CallbackQuery, state: FSMContext):
         "👥 Введите имя человека, для которого заказываете такси:"
     )
     await callback.answer()
+    # state остаётся ClientOrder.order_for - будет ждать текстовое сообщение
 
-@dp.message(ClientOrder.order_for)
+@dp.message(ClientOrder.order_for, F.text)
 async def save_order_for_name(message: types.Message, state: FSMContext):
     """Сохраняем имя человека"""
     await state.update_data(order_for=message.text)
