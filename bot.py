@@ -1280,37 +1280,22 @@ async def client_from_city(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(ClientOrder.to_city)
     await callback.answer()
 
-@dp.callback_query(ClientOrder.to_city, F.data.startswith("to_"))
-async def client_to_city(callback: types.CallbackQuery, state: FSMContext):
+@dp.callback_query(ClientOrder.from_city, F.data.startswith("from_"))
+async def client_from_city(callback: types.CallbackQuery, state: FSMContext):
     city_map = {
-        "to_aktau": "Ақтау",
-        "to_janaozen": "Жаңаөзен",
-        "to_shetpe": "Шетпе"
+        "from_aktau": "Ақтау",
+        "from_janaozen": "Жаңаөзен",
+        "from_shetpe": "Шетпе"
     }
+    from_city = city_map[callback.data]
+    await state.update_data(from_city=from_city)
     
-    to_city = city_map[callback.data]
-    data = await state.get_data()
-    
-    direction = f"{data['from_city']} → {to_city}"
-    await state.update_data(to_city=to_city, direction=direction)
-    
-    # Показываем доступных водителей
-    async with get_db() as db:
-        async with db.execute('''SELECT COUNT(*), SUM(total_seats - occupied_seats) 
-                     FROM drivers 
-                     WHERE direction=? AND is_active=1''', (data['from_city'],)) as cursor:
-            result = await cursor.fetchone()
-    
-    drivers_count = result[0] or 0
-    available_seats = result[1] or 0
-    
+    # ДОБАВЛЯЕМ КЛАВИАТУРУ!
     await callback.message.edit_text(
-        f"✅ Маршрут: {direction}\n\n"
-        f"🚗 Водителей доступно: {drivers_count}\n"
-        f"💺 Свободных мест: {available_seats}\n\n"
-        f"👥 Сколько человек поедет? (1-8)"
+        f"✅ Откуда: {from_city}\n\nКуда поедете?",
+        reply_markup=to_city_keyboard(from_city)
     )
-    await state.set_state(ClientOrder.passengers_count)
+    await state.set_state(ClientOrder.to_city)
     await callback.answer()
 
 @dp.callback_query(F.data == "back_from_city")
@@ -1374,6 +1359,9 @@ async def client_dropoff(message: types.Message, state: FSMContext):
     """Сохраняем место назначения и спрашиваем для кого заказ"""
     await state.update_data(dropoff_location=message.text)
     
+    # ВАЖНО: Сначала устанавливаем состояние, ПОТОМ отправляем сообщение
+    await state.set_state(ClientOrder.order_for)
+    
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👤 Для себя", callback_data="order_for_self")],
         [InlineKeyboardButton(text="👥 Для другого человека", callback_data="order_for_other")]
@@ -1384,7 +1372,6 @@ async def client_dropoff(message: types.Message, state: FSMContext):
         reply_markup=keyboard,
         parse_mode="HTML"
     )
-    await state.set_state(ClientOrder.order_for)
 
 @dp.callback_query(ClientOrder.order_for, F.data == "order_for_self")
 async def order_for_self(callback: types.CallbackQuery, state: FSMContext):
