@@ -23,24 +23,65 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 DATABASE_FILE = os.getenv("DATABASE_FILE", "taxi_bot.db")
 DB_TIMEOUT = 10.0
 
+# ВАЖНО: Создаем экземпляры ПЕРЕД регистрацией обработчиков
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
+db_lock = asyncio.Lock()
 
 # Connection pool
 db_lock = asyncio.Lock()
+
+# ==================== ЛОГИРОВАНИЕ ====================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('taxi_bot.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+def log_action(user_id: int, action: str, details: str = ""):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_msg = f"[{timestamp}] User {user_id}: {action}"
+    if details:
+        log_msg += f" | {details}"
+    logger.info(log_msg)
+    
+# ==================== СОСТОЯНИЯ ====================
+
+class DriverReg(StatesGroup):
+    confirm_data = State()
+    car_number = State()
+    car_model = State()
+    seats = State()
+    current_city = State()
+
+class ClientOrder(StatesGroup):
+    from_city = State()
+    to_city = State()
+    direction = State()
+    passengers_count = State()
+    pickup_location = State()
+    dropoff_location = State()
+    order_for = State()
+    add_another = State()
+
+class RatingStates(StatesGroup):
+    select_rating = State()
+    write_review = State()
 
 class ChatState(StatesGroup):
     waiting_message_to_driver = State()
     waiting_message_to_client = State()
 
+# ==================== БД И МИГРАЦИИ ====================
+
 @asynccontextmanager
 async def get_db(write=False):
-    """
-    Async context manager for database connections
-    write=True: uses exclusive lock for writes
-    write=False: allows concurrent reads
-    """
     db = None
     try:
         if write:
@@ -63,27 +104,6 @@ async def get_db(write=False):
     finally:
         if db:
             await db.close()
-
-# ==================== ЛОГИРОВАНИЕ ====================
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('taxi_bot.log'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
-
-def log_action(user_id: int, action: str, details: str = ""):
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    log_msg = f"[{timestamp}] User {user_id}: {action}"
-    if details:
-        log_msg += f" | {details}"
-    logger.info(log_msg)
-
-# ==================== БД И МИГРАЦИИ ====================
 
 class DBMigration:
     
@@ -333,12 +353,8 @@ async def init_db():
 # ==================== УТИЛИТЫ ====================
 
 async def is_admin(user_id: int) -> bool:
-    """Check if user is admin - ASYNC VERSION"""
     async with get_db() as db:
-        async with db.execute(
-            "SELECT user_id FROM admins WHERE user_id=?", 
-            (user_id,)
-        ) as cursor:
+        async with db.execute("SELECT user_id FROM admins WHERE user_id=?", (user_id,)) as cursor:
             result = await cursor.fetchone()
             return result is not None
 
@@ -496,79 +512,38 @@ def get_rating_stars(rating: float) -> str:
 
 # ==================== ВОДИТЕЛИ ====================
 
-class DriverReg(StatesGroup):
-    """Упрощённая регистрация через Telegram"""
-    confirm_data = State()
-    car_number = State()
-    car_model = State()
-    seats = State()
-    current_city = State()
-
-
 @dp.message(F.text == "🚗 Я водитель")
 async def driver_start_telegram_auth(message: types.Message, state: FSMContext):
-    """Регистрация с автоматической верификацией через Telegram"""
     user_id = message.from_user.id
     
-    # Проверяем, есть ли уже в БД
     async with get_db() as db:
-        async with db.execute(
-            "SELECT * FROM drivers WHERE user_id=?", 
-            (user_id,)
-        ) as cursor:
+        async with db.execute("SELECT * FROM drivers WHERE user_id=?", (user_id,)) as cursor:
             driver = await cursor.fetchone()
     
     if driver:
-        await show_driver_menu(message, user_id)
+        await message.answer("Вы уже зарегистрированы как водитель!")
         return
     
-    # Получаем данные от Telegram
     full_name = message.from_user.full_name
     username = message.from_user.username
     
-    # Проверяем наличие username (опционально)
-    if not username:
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Продолжить без username", callback_data="continue_no_username")],
-            [InlineKeyboardButton(text="ℹ️ Как добавить username?", callback_data="how_add_username")]
-        ])
-        
-        await message.answer(
-            "⚠️ У вас не установлен username в Telegram\n\n"
-            "Username помогает клиентам связаться с вами.\n"
-            "Рекомендуем добавить его в настройках Telegram.",
-            reply_markup=keyboard
-        )
-        await state.set_state(DriverReg.confirm_data)
-        await state.update_data(
-            telegram_id=user_id,
-            full_name=full_name,
-            username="",
-            verified_by='telegram',
-            is_verified=True
-        )
-        return
-    
-    # Сохраняем данные
     await state.update_data(
         telegram_id=user_id,
         full_name=full_name,
-        username=username,
+        username=username or "",
         verified_by='telegram',
-        is_verified=True  # Автоматически верифицирован!
+        is_verified=True
     )
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Всё верно", callback_data="confirm_telegram_data")],
-        [InlineKeyboardButton(text="✏️ Изменить имя", callback_data="change_name")]
+        [InlineKeyboardButton(text="✅ Всё верно", callback_data="confirm_telegram_data")]
     ])
     
     await message.answer(
         f"👤 <b>Ваши данные из Telegram:</b>\n\n"
         f"Имя: {full_name}\n"
-        f"Username: @{username}\n"
-        f"ID: <code>{user_id}</code>\n\n"
-        f"✅ Вы автоматически верифицированы через Telegram!",
+        f"Username: @{username if username else 'не установлен'}\n"
+        f"ID: <code>{user_id}</code>",
         reply_markup=keyboard,
         parse_mode="HTML"
     )
@@ -576,9 +551,7 @@ async def driver_start_telegram_auth(message: types.Message, state: FSMContext):
 
 @dp.callback_query(DriverReg.confirm_data, F.data == "confirm_telegram_data")
 async def confirm_telegram_data(callback: types.CallbackQuery, state: FSMContext):
-    """Подтверждение данных"""
     await callback.message.edit_text("✅ Отлично! Продолжаем регистрацию...")
-    
     await callback.message.answer("🚗 Номер авто (например: 870 ABC 09)")
     await state.set_state(DriverReg.car_number)
     await callback.answer()
@@ -1110,103 +1083,19 @@ async def driver_menu_back(callback: types.CallbackQuery):
 
 # ==================== КЛИЕНТЫ ====================
 
-class ClientOrder(StatesGroup):
-    from_city = State()
-    to_city = State()
-    direction = State()
-    passengers_count = State()
-    pickup_location = State()
-    dropoff_location = State()
-    order_for = State()
-    add_another = State()
-
 @dp.message(F.text == "🧍‍♂️ Мне нужно такси")
 async def client_start(message: types.Message, state: FSMContext):
-    """Регистрация клиента с автоматической верификацией через Telegram"""
     user_id = message.from_user.id
     
-    # Проверяем черный список
-    is_banned, reason = await check_blacklist(user_id)
-    if is_banned:
-        await message.answer(
-            f"🚫 <b>Вы заблокированы</b>\n\n"
-            f"Причина: {reason}\n\n"
-            f"Для разблокировки обратитесь к администратору.",
-            parse_mode="HTML"
-        )
-        return
+    from_city_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Ақтау", callback_data="from_aktau")],
+        [InlineKeyboardButton(text="Жаңаөзен", callback_data="from_janaozen")],
+        [InlineKeyboardButton(text="Шетпе", callback_data="from_shetpe")]
+    ])
     
-    # Проверяем, есть ли активные заказы
-    async with get_db() as db:
-        async with db.execute(
-            '''SELECT user_id, status FROM clients 
-               WHERE user_id=? AND status IN ('waiting', 'accepted', 'driver_arrived')''',
-            (user_id,)
-        ) as cursor:
-            active_order = await cursor.fetchone()
-    
-    if active_order:
-        status_text = {
-            'waiting': '⏳ Ваш заказ в очереди',
-            'accepted': '✅ Водитель принял заказ',
-            'driver_arrived': '🚗 Водитель на месте!'
-        }
-        
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📋 Мои заказы", callback_data="view_my_orders")],
-            [InlineKeyboardButton(text="❌ Отменить заказ", callback_data=f"cancel_order_{user_id}")]
-        ])
-        
-        await message.answer(
-            f"{status_text[active_order[1]]}\n\n"
-            f"У вас есть активный заказ!",
-            reply_markup=keyboard
-        )
-        return
-    
-    # Проверяем, зарегистрирован ли уже
-    async with get_db() as db:
-        async with db.execute(
-            "SELECT * FROM clients WHERE user_id=?",
-            (user_id,)
-        ) as cursor:
-            client = await cursor.fetchone()
-    
-    # Если клиент существует, но нет активных заказов - сразу к оформлению
-    if client:
-        await message.answer(
-            "🧍‍♂️ <b>Вызов такси</b>\n\n"
-            "Из какого города поедете?",
-            reply_markup=from_city_keyboard(),
-            parse_mode="HTML"
-        )
-        await state.set_state(ClientOrder.from_city)
-        return
-    
-    # Новый клиент - автоматическая регистрация через Telegram
-    full_name = message.from_user.full_name or "Клиент"
-    username = message.from_user.username
-    
-    # Регистрируем автоматически
-    async with get_db(write=True) as db:
-        await db.execute(
-            '''INSERT INTO clients 
-               (user_id, full_name, phone, direction, from_city, to_city,
-                queue_position, passengers_count, pickup_location, dropoff_location,
-                is_verified, status)
-               VALUES (?, ?, ?, '', '', '', 0, 0, '', '', 1, 'registered')''',
-            (user_id, full_name, f"@{username}" if username else f"tg_{user_id}")
-        )
-    
-    await save_log_action(user_id, "client_registered", f"Auto via Telegram: {full_name}")
-    
-    # Сразу переходим к заказу
     await message.answer(
-        f"✅ <b>Добро пожаловать, {full_name}!</b>\n\n"
-        f"Вы автоматически зарегистрированы через Telegram.\n\n"
-        f"🧍‍♂️ <b>Вызов такси</b>\n\n"
-        f"Из какого города поедете?",
-        reply_markup=from_city_keyboard(),
+        "🧍‍♂️ <b>Вызов такси</b>\n\nИз какого города поедете?",
+        reply_markup=from_city_keyboard,
         parse_mode="HTML"
     )
     await state.set_state(ClientOrder.from_city)
@@ -1385,15 +1274,9 @@ async def client_from_city(callback: types.CallbackQuery, state: FSMContext):
         "from_janaozen": "Жаңаөзен",
         "from_shetpe": "Шетпе"
     }
-    
     from_city = city_map[callback.data]
     await state.update_data(from_city=from_city)
-    
-    await callback.message.edit_text(
-        f"✅ Откуда: {from_city}\n\n"
-        "Куда поедете?",
-        reply_markup=to_city_keyboard(from_city)
-    )
+    await callback.message.edit_text(f"✅ Откуда: {from_city}\n\nКуда поедете?")
     await state.set_state(ClientOrder.to_city)
     await callback.answer()
 
@@ -1541,6 +1424,9 @@ async def finalize_order(callback: types.CallbackQuery, state: FSMContext):
         
         queue_pos = (max_pos or 0) + 1
         
+        # Удаляем старую запись если есть (клиент может быть зарегистрирован, но без активных заказов)
+        await db.execute('DELETE FROM clients WHERE user_id=? AND status="registered"', (callback.from_user.id,))
+        
         # Добавляем клиента
         await db.execute('''INSERT INTO clients 
                      (user_id, full_name, phone, direction, from_city, to_city, 
@@ -1636,6 +1522,10 @@ async def finalize_order_from_message(message: types.Message, state: FSMContext)
         
         queue_pos = (max_pos or 0) + 1
         
+        # Удаляем старую запись если есть (клиент может быть зарегистрирован, но без активных заказов)
+        await db.execute('DELETE FROM clients WHERE user_id=? AND status="registered"', 
+                (message.from_user.id,))
+
         # Добавляем клиента
         await db.execute('''INSERT INTO clients 
                      (user_id, full_name, phone, direction, from_city, to_city, 
@@ -1739,10 +1629,6 @@ async def add_another_order_no(callback: types.CallbackQuery, state: FSMContext)
     await callback.answer()
 
 # ==================== РЕЙТИНГИ ====================
-
-class RatingStates(StatesGroup):
-    select_rating = State()
-    write_review = State()
 
 @dp.message(F.text == "⭐ Мой профиль")
 async def show_profile(message: types.Message):
@@ -1926,17 +1812,6 @@ async def info_command(message: types.Message):
     await message.answer(
         "ℹ️ <b>О нас</b>\n\n"
         "🚖 Система заказа такси в реальном времени\n\n"
-        "<b>Для водителей:</b>\n"
-        "• Верификация через Telegram\n"
-        "• Принимайте несколько клиентов\n"
-        "• Видите свободные места\n"
-        "• Получайте рейтинги\n\n"
-        "<b>Для клиентов:</b>\n"
-        "• Верификация через Telegram\n"
-        "• Укажите кол-во пассажиров\n"
-        "• Видите доступные машины\n"
-        "• Отменяйте при необходимости\n"
-        "• Оценивайте водителей\n\n"
         "Просто и быстро! ⚡",
         reply_markup=main_menu_keyboard(),
         parse_mode="HTML"
@@ -2236,13 +2111,28 @@ async def reset_cancellation(message: types.Message):
         await message.answer("❌ Неверный USER_ID")
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
+        
+@dp.message()
+async def handle_unknown(message: types.Message):
+    logger.warning(f"Unhandled message from {message.from_user.id}: {message.text}")
+    await message.answer(
+        "❓ Я не понял эту команду.\n\nИспользуйте кнопки меню:",
+        reply_markup=main_menu_keyboard()
+    )
 
 # ==================== СТАРТ ====================
 
 async def main():
     await init_db()
     logger.info("🚀 Бот запущен")
-    await dp.start_polling(bot)
+    
+    # ВАЖНО: Удаляем webhook если был
+    await bot.delete_webhook(drop_pending_updates=True)
+    
+    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Бот остановлен пользователем")
