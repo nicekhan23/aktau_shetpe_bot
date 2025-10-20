@@ -14,8 +14,6 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from contextlib import asynccontextmanager
-from twilio.rest import Client
-from twilio.base.exceptions import TwilioRestException
 import random
 import string
 
@@ -24,7 +22,6 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 DATABASE_FILE = os.getenv("DATABASE_FILE", "taxi_bot.db")
 DB_TIMEOUT = 10.0
-SMS_API_KEY = os.getenv("SMS_API_KEY", "")
 
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
@@ -32,6 +29,10 @@ dp = Dispatcher(storage=storage)
 
 # Connection pool
 db_lock = asyncio.Lock()
+
+class ChatState(StatesGroup):
+    waiting_message_to_driver = State()
+    waiting_message_to_client = State()
 
 @asynccontextmanager
 async def get_db(write=False):
@@ -81,140 +82,6 @@ def log_action(user_id: int, action: str, details: str = ""):
     if details:
         log_msg += f" | {details}"
     logger.info(log_msg)
-
-# ==================== УТИЛИТЫ SMS ====================
-
-def generate_verification_code() -> str:
-    return ''.join(random.choices(string.digits, k=4))
-
-async def send_sms(phone: str, message: str) -> bool:
-    """Отправка SMS через Twilio"""
-    account_sid = os.getenv("TWILIO_ACCOUNT_SID", "")
-    auth_token = os.getenv("TWILIO_AUTH_TOKEN", "")
-    twilio_number = os.getenv("TWILIO_PHONE_NUMBER", "")
-    dev_mode = os.getenv("DEV_MODE", "false").lower() == "true"
-    
-    # Режим разработки
-    if dev_mode or not account_sid or not auth_token or not twilio_number:
-        logger.warning(f"[TEST MODE] SMS для {phone}: {message}")
-        return True
-    
-    # Очистка номера
-    phone_clean = phone.strip()
-    if not phone_clean.startswith('+'):
-        # Добавляем + если его нет
-        if phone_clean.startswith('7') or phone_clean.startswith('8'):
-            phone_clean = '+' + phone_clean.replace('8', '7', 1)
-        else:
-            phone_clean = '+7' + phone_clean
-    
-    # Проверка длины (должно быть +7XXXXXXXXXX = 12 символов)
-    if len(phone_clean) != 12:
-        logger.error(f"❌ Неверная длина номера: {phone_clean} (длина: {len(phone_clean)})")
-        return False
-    
-    logger.info(f"📱 Отправка SMS через Twilio на {phone_clean}")
-    
-    try:
-        # Создаём клиент Twilio
-        client = Client(account_sid, auth_token)
-        
-        # Отправляем SMS
-        sms = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: client.messages.create(
-                body=message,
-                from_=twilio_number,
-                to=phone_clean
-            )
-        )
-        
-        logger.info(f"✅ SMS отправлено на {phone_clean} (SID: {sms.sid})")
-        logger.info(f"   Статус: {sms.status}")
-        return True
-        
-    except TwilioRestException as e:
-        logger.error(f"❌ Twilio error ({e.code}): {e.msg}")
-        
-        # Расшифровка популярных ошибок
-        error_messages = {
-            21211: "Неверный номер телефона 'To'",
-            21212: "Неверный номер телефона 'From' (проверь TWILIO_PHONE_NUMBER)",
-            21608: "Этот номер не верифицирован (для trial аккаунта)",
-            21606: "Номер не может получать SMS",
-            21614: "Не хватает средств на балансе"
-        }
-        
-        if e.code in error_messages:
-            logger.error(f"   Причина: {error_messages[e.code]}")
-        
-        return False
-        
-    except Exception as e:
-        logger.error(f"💥 Неожиданная ошибка отправки SMS: {e}")
-        return False
-
-
-async def check_twilio_balance() -> dict:
-    """Проверка баланса Twilio"""
-    account_sid = os.getenv("TWILIO_ACCOUNT_SID", "")
-    auth_token = os.getenv("TWILIO_AUTH_TOKEN", "")
-    
-    if not account_sid or not auth_token:
-        return {"balance": 0, "currency": "USD", "type": "unknown"}
-    
-    try:
-        client = Client(account_sid, auth_token)
-        
-        account = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: client.api.accounts(account_sid).fetch()
-        )
-        
-        balance = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: client.balance.fetch()
-        )
-        
-        account_type = "Trial" if account.status == "active" and account.type == "Trial" else "Paid"
-        
-        logger.info(f"💰 Баланс Twilio: {balance.balance} {balance.currency} ({account_type})")
-        
-        return {
-            "balance": float(balance.balance),
-            "currency": balance.currency,
-            "type": account_type,
-            "status": account.status
-        }
-        
-    except Exception as e:
-        logger.error(f"Ошибка проверки баланса Twilio: {e}")
-        return {"balance": 0, "currency": "USD", "type": "unknown"}
-
-
-async def get_twilio_phone_number() -> str:
-    """Получить номер Twilio"""
-    account_sid = os.getenv("TWILIO_ACCOUNT_SID", "")
-    auth_token = os.getenv("TWILIO_AUTH_TOKEN", "")
-    
-    if not account_sid or not auth_token:
-        return "Not configured"
-    
-    try:
-        client = Client(account_sid, auth_token)
-        
-        numbers = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: client.incoming_phone_numbers.list(limit=1)
-        )
-        
-        if numbers:
-            return numbers[0].phone_number
-        return "No phone number"
-        
-    except Exception as e:
-        logger.error(f"Ошибка получения номера Twilio: {e}")
-        return "Error"
 
 # ==================== БД И МИГРАЦИИ ====================
 
@@ -623,38 +490,85 @@ def get_rating_stars(rating: float) -> str:
 # ==================== ВОДИТЕЛИ ====================
 
 class DriverReg(StatesGroup):
-    phone = State()
-    verify_code = State()
-    full_name = State()
+    """Упрощённая регистрация через Telegram"""
+    confirm_data = State()
     car_number = State()
     car_model = State()
     seats = State()
     current_city = State()
 
+
 @dp.message(F.text == "🚗 Я водитель")
-async def driver_start(message: types.Message, state: FSMContext):
+async def driver_start_telegram_auth(message: types.Message, state: FSMContext):
+    """Регистрация с автоматической верификацией через Telegram"""
+    user_id = message.from_user.id
+    
+    # Проверяем, есть ли уже в БД
     async with get_db() as db:
-        async with db.execute("SELECT * FROM drivers WHERE user_id=?", (message.from_user.id,)) as cursor:
+        async with db.execute(
+            "SELECT * FROM drivers WHERE user_id=?", 
+            (user_id,)
+        ) as cursor:
             driver = await cursor.fetchone()
     
-    if driver and driver[9]:  # is_verified
-        await show_driver_menu(message, message.from_user.id)
+    if driver:
+        await show_driver_menu(message, user_id)
         return
     
-    if driver and not driver[9]:
+    # Получаем данные от Telegram
+    full_name = message.from_user.full_name
+    username = message.from_user.username
+    
+    # Проверяем наличие username (опционально)
+    if not username:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Продолжить без username", callback_data="continue_no_username")],
+            [InlineKeyboardButton(text="ℹ️ Как добавить username?", callback_data="how_add_username")]
+        ])
+        
         await message.answer(
-            "⏳ Вы уже зарегистрированы, но не верифицированы.\n"
-            "Введите код из SMS:"
+            "⚠️ У вас не установлен username в Telegram\n\n"
+            "Username помогает клиентам связаться с вами.\n"
+            "Рекомендуем добавить его в настройках Telegram.",
+            reply_markup=keyboard
         )
-        await state.set_state(DriverReg.verify_code)
+        await state.set_state(DriverReg.confirm_data)
         return
+    
+    # Сохраняем данные
+    await state.update_data(
+        telegram_id=user_id,
+        full_name=full_name,
+        username=username,
+        verified_by='telegram',
+        is_verified=True  # Автоматически верифицирован!
+    )
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Всё верно", callback_data="confirm_telegram_data")],
+        [InlineKeyboardButton(text="✏️ Изменить имя", callback_data="change_name")]
+    ])
     
     await message.answer(
-        "🚗 <b>Регистрация водителя</b>\n\n"
-        "Введите номер телефона в формате +7XXXXXXXXXX:",
+        f"👤 <b>Ваши данные из Telegram:</b>\n\n"
+        f"Имя: {full_name}\n"
+        f"Username: @{username}\n"
+        f"ID: <code>{user_id}</code>\n\n"
+        f"✅ Вы автоматически верифицированы через Telegram!",
+        reply_markup=keyboard,
         parse_mode="HTML"
     )
-    await state.set_state(DriverReg.phone)
+    await state.set_state(DriverReg.confirm_data)
+
+@dp.callback_query(DriverReg.confirm_data, F.data == "confirm_telegram_data")
+async def confirm_telegram_data(callback: types.CallbackQuery, state: FSMContext):
+    """Подтверждение данных"""
+    await callback.message.edit_text("✅ Отлично! Продолжаем регистрацию...")
+    
+    await callback.message.answer("🚗 Номер авто (например: 870 ABC 09)")
+    await state.set_state(DriverReg.car_number)
+    await callback.answer()
+
 
 @dp.message(DriverReg.phone)
 async def driver_phone(message: types.Message, state: FSMContext):
@@ -745,9 +659,10 @@ async def driver_current_city(callback: types.CallbackQuery, state: FSMContext):
         await db.execute('''INSERT INTO drivers 
                      (user_id, full_name, phone, car_number, car_model, total_seats, 
                       direction, queue_position, is_active, is_verified, occupied_seats)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, 0, 1, 1, 0)''',
-                  (callback.from_user.id, data['full_name'], data['phone'], data['car_number'],
-                   data['car_model'], data['seats'], current_city, 0))
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                  (callback.from_user.id, data['full_name'], data['phone'], 
+                   data['car_number'], data['car_model'], data['seats'], 
+                   current_city, 0, 1, 1, 0))
     
     await save_log_action(callback.from_user.id, "driver_registered", 
                    f"Current city: {current_city}")
@@ -945,18 +860,18 @@ async def driver_available_orders(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("accept_client_"))
 async def accept_client(callback: types.CallbackQuery):
-    """Водитель принимает клиента - FIXED VERSION WITH PROPER LOCKING"""
+    """Водитель принимает клиента - С ПРЯМОЙ СВЯЗЬЮ"""
     client_id = int(callback.data.split("_")[2])
     driver_id = callback.from_user.id
     
     try:
         async with get_db(write=True) as db:
-            # First, lock the client row by checking and updating in one atomic operation
             cursor = await db.execute(
                 '''UPDATE clients 
                    SET status='accepted', assigned_driver_id=? 
                    WHERE user_id=? AND status='waiting'
-                   RETURNING passengers_count, full_name, pickup_location, direction''', 
+                   RETURNING passengers_count, full_name, pickup_location, 
+                            dropoff_location, direction''', 
                 (driver_id, client_id)
             )
             client = await cursor.fetchone()
@@ -965,11 +880,11 @@ async def accept_client(callback: types.CallbackQuery):
                 await callback.answer("❌ Клиент уже взят другим водителем!", show_alert=True)
                 return
             
-            passengers_count, full_name, pickup_location, direction = client
+            passengers_count, full_name, pickup_location, dropoff_location, direction = client
             
-            # Check available seats
+            # Проверяем свободные места
             cursor = await db.execute(
-                "SELECT total_seats, COALESCE(occupied_seats, 0) FROM drivers WHERE user_id=?",
+                "SELECT total_seats, COALESCE(occupied_seats, 0), car_model, car_number FROM drivers WHERE user_id=?",
                 (driver_id,)
             )
             driver_data = await cursor.fetchone()
@@ -978,11 +893,10 @@ async def accept_client(callback: types.CallbackQuery):
                 await callback.answer("❌ Ошибка: водитель не найден", show_alert=True)
                 return
             
-            total, occupied = driver_data
+            total, occupied, car_model, car_number = driver_data
             available = total - occupied
             
             if passengers_count > available:
-                # Rollback the client status
                 await db.execute(
                     "UPDATE clients SET status='waiting', assigned_driver_id=NULL WHERE user_id=?",
                     (client_id,)
@@ -993,7 +907,7 @@ async def accept_client(callback: types.CallbackQuery):
                 )
                 return
             
-            # Update driver's occupied seats
+            # Обновляем занятость
             await db.execute(
                 '''UPDATE drivers 
                    SET occupied_seats = COALESCE(occupied_seats, 0) + ? 
@@ -1001,38 +915,35 @@ async def accept_client(callback: types.CallbackQuery):
                 (passengers_count, driver_id)
             )
             
-            # Create trip
+            # Создаём поездку
             await db.execute(
-                '''INSERT INTO trips (driver_id, client_id, direction, status, passengers_count, pickup_location)
-                   VALUES (?, ?, ?, 'accepted', ?, ?)''', 
-                (driver_id, client_id, direction, passengers_count, pickup_location)
+                '''INSERT INTO trips (driver_id, client_id, direction, status, passengers_count, pickup_location, dropoff_location)
+                   VALUES (?, ?, ?, 'accepted', ?, ?, ?)''', 
+                (driver_id, client_id, direction, passengers_count, pickup_location, dropoff_location)
             )
-            
-            # Get car info
-            cursor = await db.execute(
-                "SELECT car_model, car_number FROM drivers WHERE user_id=?", 
-                (driver_id,)
-            )
-            car_info = await cursor.fetchone()
         
-        await save_log_action(
+        await save_log_action(driver_id, "client_accepted", f"Client: {client_id}")
+        
+        # ===== ОТПРАВЛЯЕМ УВЕДОМЛЕНИЯ С КНОПКАМИ СВЯЗИ =====
+        
+        # Клиенту
+        await notify_client_driver_accepted(
+            client_id, 
             driver_id, 
-            "client_accepted", 
-            f"Client: {client_id}, Passengers: {passengers_count}"
+            (car_model, car_number)
         )
         
-        # Notify client (outside transaction)
-        try:
-            await bot.send_message(
-                client_id,
-                f"✅ <b>Водитель принял ваш заказ!</b>\n\n"
-                f"🚗 {car_info[0]} ({car_info[1]})\n"
-                f"📍 Встреча: {pickup_location}\n\n"
-                f"Ожидайте водителя!",
-                parse_mode="HTML"
-            )
-        except Exception as e:
-            logger.error(f"Failed to notify client {client_id}: {e}")
+        # Водителю
+        await notify_driver_client_info(
+            driver_id,
+            client_id,
+            {
+                'full_name': full_name,
+                'passengers_count': passengers_count,
+                'pickup_location': pickup_location,
+                'dropoff_location': dropoff_location
+            }
+        )
         
         await callback.answer(f"✅ Клиент {full_name} добавлен!", show_alert=True)
         await driver_available_orders(callback)
@@ -1228,8 +1139,6 @@ async def driver_menu_back(callback: types.CallbackQuery):
 # ==================== КЛИЕНТЫ ====================
 
 class ClientOrder(StatesGroup):
-    phone = State()
-    verify_code = State()
     from_city = State()
     to_city = State()
     direction = State()
@@ -1241,56 +1150,94 @@ class ClientOrder(StatesGroup):
 
 @dp.message(F.text == "🧍‍♂️ Мне нужно такси")
 async def client_start(message: types.Message, state: FSMContext):
-    async with get_db() as db:
-        async with db.execute("SELECT * FROM clients WHERE user_id=?", (message.from_user.id,)) as cursor:
-            client = await cursor.fetchone()
+    """Регистрация клиента с автоматической верификацией через Telegram"""
+    user_id = message.from_user.id
     
-    # Если клиент уже верифицирован и имеет активный заказ
-    if client and client[10]:  # is_verified
-        if client[12] in ('waiting', 'accepted', 'driver_arrived'):  # status
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="❌ Отменить заказ", callback_data="client_cancel")]
-            ])
-            
-            status_text = {
-                'waiting': '⏳ Ваш заказ в очереди',
-                'accepted': '✅ Водитель принял заказ',
-                'driver_arrived': '🚗 Водитель на месте!'
-            }
-            
-            await message.answer(
-                f"{status_text[client[12]]}\n\n"
-                f"Вы уже в системе!",
-                reply_markup=keyboard
-            )
-            return
-        else:
-            # Верифицирован, но нет активного заказа - сразу к выбору городов
-            await message.answer(
-                "🧍‍♂️ <b>Вызов такси</b>\n\n"
-                "Из какого города поедете?",
-                reply_markup=from_city_keyboard(),
-                parse_mode="HTML"
-            )
-            await state.set_state(ClientOrder.from_city)
-            return
-    
-    # Если не верифицирован - запрашиваем телефон
-    if client and not client[10]:  # не верифицирован
+    # Проверяем черный список
+    is_banned, reason = await check_blacklist(user_id)
+    if is_banned:
         await message.answer(
-            "⏳ Вы уже начали регистрацию.\n"
-            "Введите код из SMS:"
+            f"🚫 <b>Вы заблокированы</b>\n\n"
+            f"Причина: {reason}\n\n"
+            f"Для разблокировки обратитесь к администратору.",
+            parse_mode="HTML"
         )
-        await state.set_state(ClientOrder.verify_code)
         return
     
-    # Новый пользователь
+    # Проверяем, есть ли активные заказы
+    async with get_db() as db:
+        async with db.execute(
+            '''SELECT user_id, status FROM clients 
+               WHERE user_id=? AND status IN ('waiting', 'accepted', 'driver_arrived')''',
+            (user_id,)
+        ) as cursor:
+            active_order = await cursor.fetchone()
+    
+    if active_order:
+        status_text = {
+            'waiting': '⏳ Ваш заказ в очереди',
+            'accepted': '✅ Водитель принял заказ',
+            'driver_arrived': '🚗 Водитель на месте!'
+        }
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📋 Мои заказы", callback_data="view_my_orders")],
+            [InlineKeyboardButton(text="❌ Отменить заказ", callback_data=f"cancel_order_{user_id}")]
+        ])
+        
+        await message.answer(
+            f"{status_text[active_order[1]]}\n\n"
+            f"У вас есть активный заказ!",
+            reply_markup=keyboard
+        )
+        return
+    
+    # Проверяем, зарегистрирован ли уже
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT * FROM clients WHERE user_id=?",
+            (user_id,)
+        ) as cursor:
+            client = await cursor.fetchone()
+    
+    # Если клиент существует, но нет активных заказов - сразу к оформлению
+    if client:
+        await message.answer(
+            "🧍‍♂️ <b>Вызов такси</b>\n\n"
+            "Из какого города поедете?",
+            reply_markup=from_city_keyboard(),
+            parse_mode="HTML"
+        )
+        await state.set_state(ClientOrder.from_city)
+        return
+    
+    # Новый клиент - автоматическая регистрация через Telegram
+    full_name = message.from_user.full_name or "Клиент"
+    username = message.from_user.username
+    
+    # Регистрируем автоматически
+    async with get_db(write=True) as db:
+        await db.execute(
+            '''INSERT INTO clients 
+               (user_id, full_name, phone, direction, from_city, to_city,
+                queue_position, passengers_count, pickup_location, dropoff_location,
+                is_verified, status)
+               VALUES (?, ?, ?, '', '', '', 0, 0, '', '', 1, 'registered')''',
+            (user_id, full_name, f"@{username}" if username else f"tg_{user_id}")
+        )
+    
+    await save_log_action(user_id, "client_registered", f"Auto via Telegram: {full_name}")
+    
+    # Сразу переходим к заказу
     await message.answer(
-        "🧍‍♂️ <b>Регистрация клиента</b>\n\n"
-        "Введите номер телефона в формате +7XXXXXXXXXX:",
+        f"✅ <b>Добро пожаловать, {full_name}!</b>\n\n"
+        f"Вы автоматически зарегистрированы через Telegram.\n\n"
+        f"🧍‍♂️ <b>Вызов такси</b>\n\n"
+        f"Из какого города поедете?",
+        reply_markup=from_city_keyboard(),
         parse_mode="HTML"
     )
-    await state.set_state(ClientOrder.phone)
+    await state.set_state(ClientOrder.from_city)
     
 @dp.message(ClientOrder.phone)
 async def client_phone(message: types.Message, state: FSMContext):
@@ -2370,155 +2317,6 @@ async def reset_cancellation(message: types.Message):
         await message.answer("❌ Неверный USER_ID")
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
-        
-@dp.message(Command("twiliocheck"))
-async def twilio_check_command(message: types.Message):
-    """Проверка конфигурации Twilio (только для админов)"""
-    if not await is_admin(message.from_user.id):
-        await message.answer("❌ Нет доступа")
-        return
-    
-    account_sid = os.getenv("TWILIO_ACCOUNT_SID", "")
-    auth_token = os.getenv("TWILIO_AUTH_TOKEN", "")
-    twilio_number = os.getenv("TWILIO_PHONE_NUMBER", "")
-    dev_mode = os.getenv("DEV_MODE", "false")
-    
-    msg = "🔍 <b>Конфигурация Twilio:</b>\n\n"
-    
-    if not account_sid:
-        msg += "❌ TWILIO_ACCOUNT_SID не установлен\n"
-    else:
-        masked_sid = account_sid[:6] + "..." + account_sid[-4:]
-        msg += f"✅ Account SID: <code>{masked_sid}</code>\n"
-    
-    if not auth_token:
-        msg += "❌ TWILIO_AUTH_TOKEN не установлен\n"
-    else:
-        msg += f"✅ Auth Token: <code>***...{auth_token[-4:]}</code>\n"
-    
-    if not twilio_number:
-        msg += "❌ TWILIO_PHONE_NUMBER не установлен\n"
-    else:
-        msg += f"✅ Phone: <code>{twilio_number}</code>\n"
-    
-    msg += f"\n🔧 Режим разработки: {'✅ Включён' if dev_mode == 'true' else '❌ Выключен'}\n"
-    
-    await message.answer(msg, parse_mode="HTML")
-    
-    # Проверяем подключение
-    if account_sid and auth_token:
-        await message.answer("🔄 Проверяю подключение к Twilio...")
-        
-        balance_info = await check_twilio_balance()
-        
-        if balance_info['type'] != 'unknown':
-            balance_msg = f"💰 <b>Баланс Twilio:</b>\n\n"
-            balance_msg += f"Сумма: {balance_info['balance']} {balance_info['currency']}\n"
-            balance_msg += f"Тип аккаунта: {balance_info['type']}\n"
-            balance_msg += f"Статус: {balance_info['status']}\n\n"
-            
-            if balance_info['type'] == 'Trial':
-                balance_msg += "⚠️ <b>Trial аккаунт</b>\n"
-                balance_msg += "SMS можно отправлять только на верифицированные номера!\n\n"
-                balance_msg += "Чтобы верифицировать номер:\n"
-                balance_msg += "1. console.twilio.com\n"
-                balance_msg += "2. Phone Numbers → Verified Caller IDs\n"
-                balance_msg += "3. Add a new number"
-            elif float(balance_info['balance']) < 1:
-                balance_msg += "⚠️ Низкий баланс! Пополните счёт"
-            
-            await message.answer(balance_msg, parse_mode="HTML")
-            
-            # Получаем номер телефона
-            phone = await get_twilio_phone_number()
-            await message.answer(f"📱 Ваш Twilio номер: <code>{phone}</code>", parse_mode="HTML")
-        else:
-            await message.answer("❌ Не удалось подключиться к Twilio")
-
-
-@dp.message(Command("twiliotest"))
-async def twilio_test_command(message: types.Message):
-    """Тест отправки SMS через Twilio (только для админов)"""
-    if not await is_admin(message.from_user.id):
-        await message.answer("❌ Нет доступа")
-        return
-    
-    parts = message.text.split()
-    if len(parts) < 2:
-        await message.answer(
-            "Используйте: /twiliotest +77001234567\n\n"
-            "⚠️ Для Trial аккаунта номер должен быть верифицирован!"
-        )
-        return
-    
-    phone = parts[1]
-    
-    await message.answer(f"📤 Отправляю тестовое SMS на {phone}...")
-    
-    test_message = f"🚖 Тест от TaxiBot\nВремя: {datetime.now().strftime('%H:%M:%S')}"
-    
-    success = await send_sms(phone, test_message)
-    
-    if success:
-        await message.answer(
-            "✅ <b>SMS успешно отправлено!</b>\n\n"
-            "Проверьте телефон",
-            parse_mode="HTML"
-        )
-    else:
-        await message.answer(
-            "❌ <b>Ошибка отправки</b>\n\n"
-            "Проверьте логи выше для деталей.\n\n"
-            "Частые причины:\n"
-            "• Номер не верифицирован (Trial)\n"
-            "• Неверный формат номера\n"
-            "• Недостаточно средств\n"
-            "• Неверные учётные данные",
-            parse_mode="HTML"
-        )
-
-
-@dp.message(Command("verifynumber"))
-async def verify_number_command(message: types.Message):
-    """Инструкция по верификации номера для Trial"""
-    if not await is_admin(message.from_user.id):
-        await message.answer("❌ Нет доступа")
-        return
-    
-    await message.answer(
-        "📱 <b>Верификация номера (Trial аккаунт)</b>\n\n"
-        "Trial аккаунт Twilio может отправлять SMS только на верифицированные номера.\n\n"
-        "<b>Как верифицировать номер:</b>\n\n"
-        "1. Зайди на https://console.twilio.com\n"
-        "2. Phone Numbers → Verified Caller IDs\n"
-        "3. Нажми '+' (Add a new number)\n"
-        "4. Введи номер в формате +77001234567\n"
-        "5. Получи SMS с кодом\n"
-        "6. Введи код\n\n"
-        "✅ После этого можно отправлять SMS на этот номер!\n\n"
-        "💰 <b>Чтобы отправлять всем:</b>\n"
-        "Пополни баланс минимум на $20 - аккаунт станет полным",
-        parse_mode="HTML"
-    )
-
-
-@dp.message(Command("smsinfo"))
-async def sms_info_command(message: types.Message):
-    """Информация об SMS-сервисе"""
-    await message.answer(
-        "📱 <b>SMS-сервис: Twilio</b>\n\n"
-        "✅ Статус: Активен\n\n"
-        "<b>Команды для админов:</b>\n"
-        "/twiliocheck - проверить конфигурацию\n"
-        "/twiliotest +77001234567 - отправить тест\n"
-        "/verifynumber - как верифицировать номер\n\n"
-        "<b>Тарифы Twilio:</b>\n"
-        "• Казахстан: ~$0.07/SMS (~35₽)\n"
-        "• Россия: ~$0.02/SMS (~10₽)\n"
-        "• Входящие SMS: $0.0075\n\n"
-        "📞 Поддержка: https://support.twilio.com",
-        parse_mode="HTML"
-    )
 
 # ==================== СТАРТ ====================
 
