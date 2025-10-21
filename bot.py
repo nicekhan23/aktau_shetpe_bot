@@ -1545,14 +1545,14 @@ async def ask_order_for(message: types.Message, state: FSMContext):
         await message.answer("Сан енгізіңіз!")
 
 
-@dp.callback_query(ClientOrder.order_for, F.data == "order_for_self")
+@dp.callback_query(F.data == "order_for_self")
 async def order_for_self(callback: types.CallbackQuery, state: FSMContext):
     """Order for self"""
     await state.update_data(order_for="Маған")
     await callback.answer()
     await finalize_order(callback, state)
 
-@dp.callback_query(ClientOrder.order_for, F.data == "order_for_other")
+@dp.callback_query(F.data == "order_for_other")
 async def order_for_other(callback: types.CallbackQuery, state: FSMContext):
     """Order for another person"""
     await callback.message.edit_text(
