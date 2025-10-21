@@ -1,5 +1,5 @@
 aiofiles==23.2.1
-aiogram==3.4.1
+aiogram==3.13.1
 aiohttp==3.9.3
 aiohttp-retry==2.9.1
 aiosignal==1.4.0
@@ -13,8 +13,8 @@ idna==3.10
 magic-filter==1.0.12
 multidict==6.7.0
 propcache==0.4.1
-pydantic==2.5.3
-pydantic_core==2.14.6
+pydantic>=2.6.0
+pydantic_core>=2.16.3
 PyJWT==2.10.1
 python-dotenv==1.1.1
 requests==2.32.5
