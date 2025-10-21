@@ -1148,26 +1148,26 @@ async def client_phone_number(message: types.Message, state: FSMContext):
     data = await state.get_data()
     phone = message.text.strip()
     
-    data = await state.get_data()
-    phone = message.text.strip()
-    
     # Save client as registered (without active order)
     async with get_db(write=True) as db:
         await db.execute(
             '''INSERT OR REPLACE INTO clients
                (user_id, full_name, phone, direction, queue_position,
-                passengers_count, is_verified, status, from_city, to_city)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                passengers_count, is_verified, status, from_city, to_city,
+                pickup_location, dropoff_location)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             (message.from_user.id,
              data.get('full_name', message.from_user.full_name or "Клиент"),
              phone,
-             '',        # direction - пустая строка, т.к. ещё нет заказа
-             0,         # queue_position - 0 для не в очереди
-             1,         # passengers_count - по умолчанию 1
+             '',        # direction
+             0,         # queue_position
+             1,         # passengers_count
              1,         # is_verified
              'registered',
              '',        # from_city
-             ''         # to_city
+             '',        # to_city
+             '',        # pickup_location - add empty string
+             ''         # dropoff_location - add empty string
             )
         )
     
@@ -1415,9 +1415,9 @@ async def client_passengers_count(message: types.Message, state: FSMContext):
         from_city, to_city = data.get("from_city"), data.get("to_city")
 
         if {"Ақтау", "Шетпе"} == {from_city, to_city}:
-            price = 2000
+            price = 2000 * count
         elif {"Ақтау", "Жаңаөзен"} == {from_city, to_city}:
-            price = 2500
+            price = 2500 * count
         else:
             price = 0
 
