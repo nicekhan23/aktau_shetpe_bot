@@ -86,300 +86,116 @@ class ChatState(StatesGroup):
 
 # ==================== DATABASE AND MIGRATIONS ====================
 
-@asynccontextmanager
-async def get_db(write=False):
-    db = None
-    try:
-        if write:
-            async with db_lock:
-                db = await aiosqlite.connect(DATABASE_FILE, timeout=30.0)
-                await db.execute("PRAGMA journal_mode=WAL")
-                await db.execute("PRAGMA busy_timeout=30000")
-                yield db
-                await db.commit()
-        else:
-            db = await aiosqlite.connect(DATABASE_FILE, timeout=30.0)
-            await db.execute("PRAGMA journal_mode=WAL")
-            await db.execute("PRAGMA busy_timeout=30000")
-            yield db
-    except Exception as e:
-        if db:
-            await db.rollback()
-        logger.error(f"Database error: {e}", exc_info=True)
-        raise
-    finally:
-        if db:
-            await db.close()
-
-class DBMigration:
-    
-    @staticmethod
-    def get_db_version() -> int:
-        conn = sqlite3.connect(DATABASE_FILE)
-        c = conn.cursor()
-        c.execute("PRAGMA user_version")
-        version = c.fetchone()[0]
-        conn.close()
-        return version
-    
-    @staticmethod
-    def set_db_version(version: int):
-        conn = sqlite3.connect(DATABASE_FILE)
-        c = conn.cursor()
-        c.execute(f"PRAGMA user_version = {version}")
-        conn.commit()
-        conn.close()
-    
-    @staticmethod
-    def migrate():
-        current_version = DBMigration.get_db_version()
-        
-        if current_version < 1:
-            DBMigration.migration_v1()
-        if current_version < 2:
-            DBMigration.migration_v2()
-        if current_version < 3:
-            DBMigration.migration_v3()
-        if current_version < 4:
-            DBMigration.migration_v4()
-        if current_version < 5:
-            DBMigration.migration_v5()
-        if current_version < 6:
-            DBMigration.migration_v6()
-        if current_version < 7:
-            DBMigration.migration_v7()
-    
-    @staticmethod
-    def migration_v1():
-        logger.info("Migration v1...")
-        conn = sqlite3.connect(DATABASE_FILE)
-        c = conn.cursor()
-        
-        c.execute('''CREATE TABLE IF NOT EXISTS drivers
-                     (user_id INTEGER PRIMARY KEY,
-                      full_name TEXT NOT NULL,
-                      phone TEXT NOT NULL,
-                      car_number TEXT NOT NULL,
-                      car_model TEXT NOT NULL,
-                      total_seats INTEGER NOT NULL,
-                      direction TEXT NOT NULL,
-                      queue_position INTEGER NOT NULL,
-                      is_active INTEGER DEFAULT 0,
-                      is_verified INTEGER DEFAULT 0,
-                      verification_code TEXT,
-                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-        
-        c.execute('''CREATE TABLE IF NOT EXISTS clients
-                     (user_id INTEGER PRIMARY KEY,
-                      full_name TEXT NOT NULL,
-                      phone TEXT NOT NULL,
-                      direction TEXT NOT NULL,
-                      queue_position INTEGER NOT NULL,
-                      passengers_count INTEGER DEFAULT 1,
-                      is_verified INTEGER DEFAULT 0,
-                      verification_code TEXT,
-                      status TEXT DEFAULT 'waiting',
-                      assigned_driver_id INTEGER,
-                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-        
-        c.execute('''CREATE TABLE IF NOT EXISTS admins
-                     (user_id INTEGER PRIMARY KEY,
-                      added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-        
-        conn.commit()
-        conn.close()
-        DBMigration.set_db_version(1)
-        logger.info("Migration done")
-    
-    @staticmethod
-    def migration_v2():
-        logger.info("Migration v2...")
-        conn = sqlite3.connect(DATABASE_FILE)
-        c = conn.cursor()
-        
-        c.execute('''CREATE TABLE IF NOT EXISTS ratings
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                      from_user_id INTEGER,
-                      to_user_id INTEGER,
-                      user_type TEXT,
-                      trip_id INTEGER,
-                      rating INTEGER CHECK(rating >= 1 AND rating <= 5),
-                      review TEXT,
-                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-        
-        c.execute("PRAGMA table_info(drivers)")
-        driver_columns = [column[1] for column in c.fetchall()]
-        if 'avg_rating' not in driver_columns:
-            c.execute("ALTER TABLE drivers ADD COLUMN avg_rating REAL DEFAULT 0")
-        if 'rating_count' not in driver_columns:
-            c.execute("ALTER TABLE drivers ADD COLUMN rating_count INTEGER DEFAULT 0")
-        
-        c.execute("PRAGMA table_info(clients)")
-        client_columns = [column[1] for column in c.fetchall()]
-        if 'avg_rating' not in client_columns:
-            c.execute("ALTER TABLE clients ADD COLUMN avg_rating REAL DEFAULT 0")
-        if 'rating_count' not in client_columns:
-            c.execute("ALTER TABLE clients ADD COLUMN rating_count INTEGER DEFAULT 0")
-        
-        conn.commit()
-        conn.close()
-        DBMigration.set_db_version(2)
-        logger.info("Migration completed")
-    
-    @staticmethod
-    def migration_v3():
-        logger.info("Migration v3...")
-        conn = sqlite3.connect(DATABASE_FILE)
-        c = conn.cursor()
-        
-        c.execute('''CREATE TABLE IF NOT EXISTS trips
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                      driver_id INTEGER,
-                      client_id INTEGER,
-                      direction TEXT,
-                      passengers_count INTEGER,
-                      status TEXT,
-                      driver_arrived_at TIMESTAMP,
-                      trip_started_at TIMESTAMP,
-                      trip_completed_at TIMESTAMP,
-                      cancelled_by TEXT,
-                      cancelled_at TIMESTAMP,
-                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-        
-        c.execute('''CREATE TABLE IF NOT EXISTS actions_log
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                      user_id INTEGER,
-                      action TEXT,
-                      details TEXT,
-                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-        
-        conn.commit()
-        conn.close()
-        DBMigration.set_db_version(3)
-        logger.info("Migration completed")
-    
-    @staticmethod
-    def migration_v4():
-        """Migration v4: Adding occupied_seats for drivers"""
-        logger.info("Migration v4...")
-        conn = sqlite3.connect(DATABASE_FILE)
-        c = conn.cursor()
-        
-        c.execute("PRAGMA table_info(drivers)")
-        driver_columns = [column[1] for column in c.fetchall()]
-        
-        if 'occupied_seats' not in driver_columns:
-            c.execute("ALTER TABLE drivers ADD COLUMN occupied_seats INTEGER DEFAULT 0")
-        
-        if 'is_on_trip' not in driver_columns:
-            c.execute("ALTER TABLE drivers ADD COLUMN is_on_trip INTEGER DEFAULT 0")
-        
-        conn.commit()
-        conn.close()
-        DBMigration.set_db_version(4)
-        logger.info("Migration completed")
-
-    @staticmethod
-    def migration_v5():
-        """Migration v5: Adding blacklist system"""
-        logger.info("Migration v5...")
-        conn = sqlite3.connect(DATABASE_FILE)
-        c = conn.cursor()
-    
-        # Blacklist table
-        c.execute('''CREATE TABLE IF NOT EXISTS blacklist
-                  (user_id INTEGER PRIMARY KEY,
-                   reason TEXT,
-                   cancellation_count INTEGER DEFAULT 0,
-                   banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    
-        # Adding cancellation_count to clients
-        c.execute("PRAGMA table_info(clients)")
-        client_columns = [column[1] for column in c.fetchall()]
-    
-        if 'cancellation_count' not in client_columns:
-            c.execute("ALTER TABLE clients ADD COLUMN cancellation_count INTEGER DEFAULT 0")
-    
-        conn.commit()
-        conn.close()
-        DBMigration.set_db_version(5)
-        logger.info("Migration completed")
-        
-    @staticmethod
-    def migration_v6():
-        """Migration v6: Adding support for multiple orders"""
-        logger.info("Migration v6...")
-        conn = sqlite3.connect(DATABASE_FILE)
-        c = conn.cursor()
-
-        # Get client columns first
-        c.execute("PRAGMA table_info(clients)")
-        client_columns = [column[1] for column in c.fetchall()]
-
-        # Get driver columns
-        c.execute("PRAGMA table_info(drivers)")
-        driver_columns = [column[1] for column in c.fetchall()]
-    
-        if 'order_for' not in client_columns:
-            c.execute("ALTER TABLE clients ADD COLUMN order_for TEXT DEFAULT 'self'")
-    
-        if 'order_number' not in client_columns:
-            c.execute("ALTER TABLE clients ADD COLUMN order_number INTEGER DEFAULT 1")
-    
-        if 'parent_user_id' not in client_columns:
-            c.execute("ALTER TABLE clients ADD COLUMN parent_user_id INTEGER")
-            
-        if 'from_city' not in client_columns:
-            c.execute("ALTER TABLE clients ADD COLUMN from_city TEXT DEFAULT ''")
-            
-        if 'to_city' not in client_columns:
-            c.execute("ALTER TABLE clients ADD COLUMN to_city TEXT DEFAULT ''")
-        
-        if 'payment_methods' not in driver_columns:
-            c.execute("ALTER TABLE drivers ADD COLUMN payment_methods TEXT DEFAULT ''")
-            
-        if 'kaspi_number' not in driver_columns:
-            c.execute("ALTER TABLE drivers ADD COLUMN kaspi_number TEXT DEFAULT ''")
-
-    
-        conn.commit()
-        conn.close()
-        DBMigration.set_db_version(6)
-        logger.info("Migration completed")
-        
-    @staticmethod
-    def migration_v7():
-        """Migration v7: Remove unused columns"""
-        logger.info("Migration v7...")
-        conn = sqlite3.connect(DATABASE_FILE)
-        c = conn.cursor()
-    
-        # SQLite doesn't support DROP COLUMN directly, so we recreate tables
-        # But since the app works without these columns, we can skip this
-        # Just document that pickup_location and dropoff_location are deprecated
-    
-        conn.commit()
-        conn.close()
-        DBMigration.set_db_version(7)
-        logger.info("Migration completed")
-
 async def init_db():
-    """Initialize database with WAL mode"""
-    async with get_db(write=False) as db:
-        await db.execute("PRAGMA journal_mode=WAL")
-        await db.execute("PRAGMA busy_timeout=30000")
-        
-        # Add indexes for better performance
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_clients_status ON clients(status)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_clients_direction ON clients(direction)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_drivers_direction ON drivers(direction)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_trips_driver ON trips(driver_id)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_trips_client ON trips(client_id)")
-        
-        await db.commit()
+    """Initialize database with clean schema"""
+    conn = sqlite3.connect(DATABASE_FILE)
+    c = conn.cursor()
     
-    # Run migrations (keep your existing DBMigration class)
-    DBMigration.migrate()
+    # Create drivers table
+    c.execute('''CREATE TABLE IF NOT EXISTS drivers
+                 (user_id INTEGER PRIMARY KEY,
+                  full_name TEXT NOT NULL,
+                  phone TEXT NOT NULL,
+                  car_number TEXT NOT NULL,
+                  car_model TEXT NOT NULL,
+                  total_seats INTEGER NOT NULL,
+                  direction TEXT NOT NULL,
+                  queue_position INTEGER NOT NULL,
+                  is_active INTEGER DEFAULT 0,
+                  is_verified INTEGER DEFAULT 0,
+                  verification_code TEXT,
+                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                  avg_rating REAL DEFAULT 0,
+                  rating_count INTEGER DEFAULT 0,
+                  occupied_seats INTEGER DEFAULT 0,
+                  is_on_trip INTEGER DEFAULT 0,
+                  payment_methods TEXT DEFAULT '',
+                  kaspi_number TEXT DEFAULT '')''')
+    
+    # Create clients table
+    c.execute('''CREATE TABLE IF NOT EXISTS clients
+                 (user_id INTEGER PRIMARY KEY,
+                  full_name TEXT NOT NULL,
+                  phone TEXT NOT NULL,
+                  direction TEXT NOT NULL,
+                  queue_position INTEGER NOT NULL,
+                  passengers_count INTEGER DEFAULT 1,
+                  is_verified INTEGER DEFAULT 0,
+                  verification_code TEXT,
+                  status TEXT DEFAULT 'waiting',
+                  assigned_driver_id INTEGER,
+                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                  avg_rating REAL DEFAULT 0,
+                  rating_count INTEGER DEFAULT 0,
+                  cancellation_count INTEGER DEFAULT 0,
+                  order_for TEXT DEFAULT 'self',
+                  order_number INTEGER DEFAULT 1,
+                  parent_user_id INTEGER,
+                  from_city TEXT DEFAULT '',
+                  to_city TEXT DEFAULT '')''')
+    
+    # Create admins table
+    c.execute('''CREATE TABLE IF NOT EXISTS admins
+                 (user_id INTEGER PRIMARY KEY,
+                  added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    
+    # Create ratings table
+    c.execute('''CREATE TABLE IF NOT EXISTS ratings
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  from_user_id INTEGER,
+                  to_user_id INTEGER,
+                  user_type TEXT,
+                  trip_id INTEGER,
+                  rating INTEGER CHECK(rating >= 1 AND rating <= 5),
+                  review TEXT,
+                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    
+    # Create trips table
+    c.execute('''CREATE TABLE IF NOT EXISTS trips
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  driver_id INTEGER,
+                  client_id INTEGER,
+                  direction TEXT,
+                  passengers_count INTEGER,
+                  status TEXT,
+                  driver_arrived_at TIMESTAMP,
+                  trip_started_at TIMESTAMP,
+                  trip_completed_at TIMESTAMP,
+                  cancelled_by TEXT,
+                  cancelled_at TIMESTAMP,
+                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    
+    # Create actions_log table
+    c.execute('''CREATE TABLE IF NOT EXISTS actions_log
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  user_id INTEGER,
+                  action TEXT,
+                  details TEXT,
+                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    
+    # Create blacklist table
+    c.execute('''CREATE TABLE IF NOT EXISTS blacklist
+                 (user_id INTEGER PRIMARY KEY,
+                  reason TEXT,
+                  cancellation_count INTEGER DEFAULT 0,
+                  banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    
+    # Create indexes for better performance
+    c.execute("CREATE INDEX IF NOT EXISTS idx_clients_status ON clients(status)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_clients_direction ON clients(direction)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_clients_from_city ON clients(from_city)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_drivers_direction ON drivers(direction)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_trips_driver ON trips(driver_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_trips_client ON trips(client_id)")
+    
+    # Enable WAL mode for better concurrent access
+    c.execute("PRAGMA journal_mode=WAL")
+    c.execute("PRAGMA busy_timeout=30000")
+    
+    conn.commit()
+    conn.close()
+    
+    logger.info("✅ Database initialized successfully")
 
 # ==================== UTILITIES ====================
 
@@ -1586,10 +1402,15 @@ async def save_order_for_name(message: types.Message, state: FSMContext):
     """Save the name of the person for whom the order is made"""
     await state.update_data(order_for=message.text)
     await finalize_order_from_message(message, state)
-
+    
 async def finalize_order(callback: types.CallbackQuery, state: FSMContext):
     """Finalize the order and offer to add another"""
     data = await state.get_data()
+    
+    # Build direction from from_city and to_city
+    direction = data.get('direction', f"{data.get('from_city', '')} → {data.get('to_city', '')}")
+    from_city = data.get('from_city', '')
+    to_city = data.get('to_city', '')
     
     # Count existing orders to assign order number
     current_orders = await count_user_orders(callback.from_user.id)
@@ -1599,7 +1420,7 @@ async def finalize_order(callback: types.CallbackQuery, state: FSMContext):
         # Set queue position
         async with db.execute(
             "SELECT MAX(queue_position) FROM clients WHERE direction=?",
-            (data['direction'],)
+            (direction,)
         ) as cursor:
             max_pos = (await cursor.fetchone())[0]
         
@@ -1619,21 +1440,22 @@ async def finalize_order(callback: types.CallbackQuery, state: FSMContext):
              (unique_order_id, 
              callback.from_user.full_name or "Клиент",
              f"@{callback.from_user.username}" if callback.from_user.username else f"tg_{callback.from_user.id}",
-             data['direction'],
-             data['from_city'],
-             data['to_city'],
+             direction,
+             from_city,
+             to_city,
              queue_pos, 
              data['passengers_count'],
              data['order_for'],
              order_number,
              callback.from_user.id))
+
         
         # Check suitable drivers
         async with db.execute(
             '''SELECT COUNT(*) FROM drivers 
                WHERE direction=? AND is_active=1 
                AND (total_seats - COALESCE(occupied_seats, 0)) >= ?''',
-            (data['from_city'], data['passengers_count'])
+            (from_city, data['passengers_count'])
         ) as cursor:
             suitable = (await cursor.fetchone())[0]
         
@@ -1642,11 +1464,10 @@ async def finalize_order(callback: types.CallbackQuery, state: FSMContext):
             '''SELECT user_id FROM drivers 
                WHERE direction=? AND is_active=1 
                AND (total_seats - COALESCE(occupied_seats, 0)) >= ?''',
-            (data['from_city'], data['passengers_count'])
+            (from_city, data['passengers_count'])
         ) as cursor:
             drivers = await cursor.fetchall()
     
-    # Everything below here is OUTSIDE the db context manager
     await save_log_action(
         callback.from_user.id,
         "order_created",
@@ -1660,7 +1481,7 @@ async def finalize_order(callback: types.CallbackQuery, state: FSMContext):
                 driver[0],
                 f"🔔 <b>Жаңа тапсырыс!</b>\n\n"
                 f"👥 Жолаушылар саны: {data['passengers_count']}\n"
-                f"📍 {data['from_city']} → {data['to_city']}\n"
+                f"📍 {from_city} → {to_city}\n"
                 f"Кімге: {data['order_for']}\n\n"
                 f"Мәзірге өту үшін 🚗 Жүргізуші ретінде кіру батырмасын басыңыз",
                 parse_mode="HTML"
@@ -1676,7 +1497,7 @@ async def finalize_order(callback: types.CallbackQuery, state: FSMContext):
     
     await callback.message.edit_text(
         f"✅ <b>Тапсырыс #{order_number} жасалды!</b>\n\n"
-        f"📍 {data['from_city']} → {data['to_city']}\n"
+        f"📍 {from_city} → {to_city}\n"
         f"👤 Кімге: {data['order_for']}\n"
         f"👥 Жолаушылар саны: {data['passengers_count']}\n"
         f"📊 Кезектегі орын: №{queue_pos}\n\n"
@@ -1694,9 +1515,12 @@ async def finalize_order_from_message(message: types.Message, state: FSMContext)
     order_number = current_orders + 1
     
     async with get_db(write=True) as db:
+        
+        direction = data.get('direction', f"{data.get('from_city', '')} → {data.get('to_city', '')}")
+
         async with db.execute(
             "SELECT MAX(queue_position) FROM clients WHERE direction=?",
-            (data['direction'],)
+            (direction,)
         ) as cursor:
             max_pos = (await cursor.fetchone())[0]
         
@@ -1714,17 +1538,17 @@ async def finalize_order_from_message(message: types.Message, state: FSMContext)
              queue_position, passengers_count, 
              is_verified, status, order_for, order_number, parent_user_id)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'waiting', ?, ?, ?)''',
-                (unique_order_id, 
-                message.from_user.full_name or "Клиент",
-                f"@{message.from_user.username}" if message.from_user.username else f"tg_{message.from_user.id}",
-                data['direction'],
-                data['from_city'],
-                data['to_city'],
-                queue_pos, 
-                data['passengers_count'],
-                data['order_for'],
-                order_number,
-                message.from_user.id))
+             (unique_order_id, 
+             callback.from_user.full_name or "Клиент",
+             f"@{callback.from_user.username}" if callback.from_user.username else f"tg_{callback.from_user.id}",
+             direction,  # <-- Use the variable instead of data['direction']
+             data['from_city'],
+             data['to_city'],
+             queue_pos, 
+             data['passengers_count'],
+             data['order_for'],
+             order_number,
+             callback.from_user.id))
         
         async with db.execute(
             '''SELECT COUNT(*) FROM drivers 
