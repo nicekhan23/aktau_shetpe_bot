@@ -196,6 +196,20 @@ async def init_db():
     conn.close()
     
     logger.info("✅ Database initialized successfully")
+    
+@asynccontextmanager
+async def get_db(write: bool = False):
+    """Async context manager for working with SQLite database"""
+    async with db_lock:
+        db = await aiosqlite.connect(DATABASE_FILE, timeout=DB_TIMEOUT)
+        await db.execute("PRAGMA foreign_keys = ON;")
+        try:
+            yield db
+            if write:
+                await db.commit()
+        finally:
+            await db.close()
+
 
 # ==================== UTILITIES ====================
 
@@ -485,8 +499,14 @@ async def driver_current_city(callback: types.CallbackQuery, state: FSMContext):
         f"Сіз {current_city} қаласынан шығатын барлық тапсырыстарды көре аласыз",
         parse_mode="HTML"
     )
+
     await state.clear()
+
+    # ✅ Automatically show driver menu
+    await show_driver_menu(callback.message, callback.from_user.id)
+
     await callback.answer()
+
     
 def current_city_keyboard():
     """Choosing the current city for the driver"""
@@ -579,10 +599,8 @@ async def driver_status(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "driver_passengers")
 async def driver_passengers(callback: types.CallbackQuery):
     async with get_db() as db:
-        async with db.execute('''SELECT c.user_id, c.full_name, c.passengers_count
-                     FROM clients c
-                     WHERE c.assigned_driver_id=? AND c.status IN ('accepted', 'driver_arrived')
-                     ORDER BY c.created_at''', (callback.from_user.id,)) as cursor:
+        async with db.execute('''SELECT user_id, full_name, from_city, to_city, passengers_count FROM clients WHERE assigned_driver_id=? AND status='accepted' ''',
+            (callback.from_user.id,)) as cursor:
             clients = await cursor.fetchall()
     
     if not clients:
@@ -936,6 +954,91 @@ async def driver_exit(callback: types.CallbackQuery):
 async def driver_menu_back(callback: types.CallbackQuery):
     await show_driver_menu(callback.message, callback.from_user.id)
     await callback.answer()
+    
+@dp.callback_query(F.data.startswith("driver_accept_"))
+async def driver_accept_new_order(callback: types.CallbackQuery):
+    parts = callback.data.split("_")
+    # data format: driver_accept_<client_id>_<from_city>_<to_city>_<count>
+    if len(parts) < 6:
+        await callback.answer("Қате дерек!", show_alert=True)
+        return
+
+    client_id = int(parts[2])
+    from_city = parts[3]
+    to_city = parts[4]
+    passengers_count = int(parts[5])
+    driver_id = callback.from_user.id
+
+    async with get_db(write=True) as db:
+        # Ensure client still waiting
+        async with db.execute(
+            "SELECT c.parent_user_id, u.full_name, u.phone FROM clients c JOIN clients u ON u.user_id = c.parent_user_id WHERE c.parent_user_id=? AND c.from_city=? AND c.to_city=? AND c.status='waiting'",
+            (client_id, from_city, to_city)
+        ) as cursor:
+            client = await cursor.fetchone()
+
+        if not client:
+            await callback.answer("❌ Бұл тапсырыс енді қолжетімді емес", show_alert=True)
+            return
+
+        # Assign driver
+        await db.execute(
+            "UPDATE clients SET status='accepted', assigned_driver_id=? WHERE parent_user_id=? AND status='waiting'",
+            (driver_id, client_id)
+        )
+
+        # Update occupied seats
+        await db.execute(
+            "UPDATE drivers SET occupied_seats = COALESCE(occupied_seats, 0) + ? WHERE user_id=?",
+            (passengers_count, driver_id)
+        )
+
+        # Get driver info
+        async with db.execute(
+            "SELECT full_name, phone, car_model, car_number FROM drivers WHERE user_id=?",
+            (driver_id,)
+        ) as cursor:
+            driver_data = await cursor.fetchone()
+
+    # ====== Notify both sides ======
+    client_user_id = client[0]
+    client_name = client[1]
+    client_phone = client[2] if client[2] and not client[2].startswith("tg_") else "Нөмір көрсетілмеген"
+    driver_name, driver_phone, car_model, car_number = driver_data
+
+    # ✅ Notify driver
+    await callback.message.edit_text(
+        f"✅ <b>Сіз тапсырысты қабылдадыңыз!</b>\n\n"
+        f"📍 {from_city} → {to_city}\n"
+        f"👥 Жолаушылар саны: {passengers_count}\n\n"
+        f"👤 <b>Жолаушы:</b> {client_name}\n"
+        f"📞 Телефон: {client_phone}",
+        parse_mode="HTML"
+    )
+
+    # ✅ Notify client
+    try:
+        await bot.send_message(
+            client_user_id,
+            f"✅ <b>Жүргізуші тапсырысыңызды қабылдады!</b>\n\n"
+            f"🚗 {car_model} ({car_number})\n"
+            f"👤 {driver_name}\n"
+            f"📞 Телефон: {driver_phone}\n"
+            f"📍 Маршрут: {from_city} → {to_city}\n\n"
+            f"Жүргізушінің қоңырауын күтіңіз немесе өзіңіз хабарласа аласыз.",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.warning(f"Couldn't notify client {client_user_id}: {e}")
+
+    await callback.answer("Тапсырыс қабылданды!")
+
+
+@dp.callback_query(F.data.startswith("driver_reject_"))
+async def driver_reject_new_order(callback: types.CallbackQuery):
+    await callback.message.edit_text("❌ Сіз бұл тапсырыстан бас тарттыңыз.")
+    await callback.answer("Тапсырыс қабылданбады")
+
 
 # ==================== CLIENTS ====================
 
@@ -1004,8 +1107,7 @@ async def confirm_client_telegram_data(callback: types.CallbackQuery, state: FSM
 async def client_phone_number(message: types.Message, state: FSMContext):
     data = await state.get_data()
     phone = message.text.strip()
-    
-    # Save client as registered (without active order)
+
     async with get_db(write=True) as db:
         await db.execute(
             '''INSERT OR REPLACE INTO clients
@@ -1015,17 +1117,8 @@ async def client_phone_number(message: types.Message, state: FSMContext):
             (message.from_user.id,
              data.get('full_name', message.from_user.full_name or "Клиент"),
              phone,
-             '',        # direction
-             0,         # queue_position
-             1,         # passengers_count
-             1,         # is_verified
-             'registered',
-             '',        # from_city
-             ''         # to_city
-            )
+             '', 0, 1, 1, 'registered', '', '')
         )
-
-
     
     await save_log_action(message.from_user.id, "client_registered", f"Phone: {phone}")
     
@@ -1477,15 +1570,30 @@ async def finalize_order(callback: types.CallbackQuery, state: FSMContext):
     # Notify drivers
     for driver in drivers:
         try:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="✅ Қабылдау",
+                       callback_data=f"driver_accept_{callback.from_user.id}_{data['from_city']}_{data['to_city']}_{data['passengers_count']}"
+                  ),
+                  InlineKeyboardButton(
+                        text="❌ Бас тарту",
+                        callback_data=f"driver_reject_{callback.from_user.id}"
+                    )
+                ]
+            ])
+
             await bot.send_message(
                 driver[0],
                 f"🔔 <b>Жаңа тапсырыс!</b>\n\n"
                 f"👥 Жолаушылар саны: {data['passengers_count']}\n"
                 f"📍 {from_city} → {to_city}\n"
                 f"Кімге: {data['order_for']}\n\n"
-                f"Мәзірге өту үшін 🚗 Жүргізуші ретінде кіру батырмасын басыңыз",
+                f"Төмендегі батырмалардың бірін таңдаңыз:",
+                reply_markup=keyboard,
                 parse_mode="HTML"
             )
+
         except:
             pass
     
