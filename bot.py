@@ -451,7 +451,7 @@ async def get_user_active_orders(user_id: int) -> list:
     async with get_db() as db:
         async with db.execute(
             '''SELECT user_id, full_name, order_for, order_number, status, 
-                      direction, passengers_count, pickup_location, dropoff_location,
+                      direction, passengers_count, from_city, to_city,
                       assigned_driver_id
                FROM clients 
                WHERE parent_user_id=? OR user_id=?
@@ -741,7 +741,7 @@ async def driver_status(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "driver_passengers")
 async def driver_passengers(callback: types.CallbackQuery):
     async with get_db() as db:
-        async with db.execute('''SELECT c.user_id, c.full_name, c.pickup_location, c.dropoff_location, c.passengers_count
+        async with db.execute('''SELECT c.user_id, c.full_name, c.passengers_count
                      FROM clients c
                      WHERE c.assigned_driver_id=? AND c.status IN ('accepted', 'driver_arrived')
                      ORDER BY c.created_at''', (callback.from_user.id,)) as cursor:
@@ -776,9 +776,8 @@ async def driver_available_orders(callback: types.CallbackQuery):
         occupied, total, available = await get_driver_available_seats(callback.from_user.id)
         
         # Show orders, where from_city matches driver's current city
-        async with db.execute('''SELECT user_id, full_name, pickup_location, dropoff_location, 
-                            passengers_count, queue_position, direction, from_city, to_city
-                     FROM clients 
+        async with db.execute('''SELECT user_id, full_name, passengers_count, queue_position, direction, from_city, to_city
+                     FROM clients
                      WHERE from_city=? AND status='waiting'
                      ORDER BY queue_position''', (driver_city,)) as cursor:
             clients = await cursor.fetchall()
@@ -841,8 +840,7 @@ async def accept_client(callback: types.CallbackQuery):
                 '''UPDATE clients 
                    SET status='accepted', assigned_driver_id=? 
                    WHERE user_id=? AND status='waiting'
-                   RETURNING passengers_count, full_name, pickup_location, 
-                            dropoff_location, direction''', 
+                   RETURNING passengers_count, full_name, direction''', 
                 (driver_id, client_id)
             )
             client = await cursor.fetchone()
@@ -851,7 +849,7 @@ async def accept_client(callback: types.CallbackQuery):
                 await callback.answer("❌ Клиентті басқа жүргізуші алып қойды!", show_alert=True)
                 return
             
-            passengers_count, full_name, pickup_location, dropoff_location, direction = client
+            passengers_count, full_name, direction = client
             
             # Check available seats
             cursor = await db.execute(
@@ -888,9 +886,9 @@ async def accept_client(callback: types.CallbackQuery):
             
             # Create trip record
             await db.execute(
-                '''INSERT INTO trips (driver_id, client_id, direction, status, passengers_count, pickup_location, dropoff_location)
-                   VALUES (?, ?, ?, 'accepted', ?, ?, ?)''', 
-                (driver_id, client_id, direction, passengers_count, pickup_location, dropoff_location)
+                '''INSERT INTO trips (driver_id, client_id, direction, status, passengers_count)
+                   VALUES (?, ?, ?, 'accepted', ?)''',
+                (driver_id, client_id, direction, passengers_count)
             )
         
         await save_log_action(driver_id, "client_accepted", f"Client: {client_id}")
@@ -926,7 +924,7 @@ async def accept_client(callback: types.CallbackQuery):
                 f"✅ <b>Тапсырыс қабылданды!</b>\n\n"
                 f"👤 Жолаушы: {client_full_name}\n"
                 f"📞 Байланыс: {client_phone}\n"
-                f"📍 {pickup_location} → {dropoff_location}\n"
+                f"📍 {data['from_city']} → {data['to_city']}\n"
                 f"👥 Орын: {passengers_count}\n"
                 f"ℹ️ Кімге: {order_for_info}",
                 parse_mode="HTML"
@@ -1150,15 +1148,27 @@ async def client_phone_number(message: types.Message, state: FSMContext):
     data = await state.get_data()
     phone = message.text.strip()
     
+    data = await state.get_data()
+    phone = message.text.strip()
+    
     # Save client as registered (without active order)
     async with get_db(write=True) as db:
         await db.execute(
-            '''INSERT OR REPLACE INTO clients 
-               (user_id, full_name, phone, direction, queue_position, 
-                passengers_count, pickup_location, dropoff_location, 
-                is_verified, status, from_city, to_city)
-               VALUES (?, ?, ?, '', 0, 0, '', '', 1, 'registered', '', '')''',
-            (message.from_user.id, data['full_name'], phone)
+            '''INSERT OR REPLACE INTO clients
+               (user_id, full_name, phone, direction, queue_position,
+                passengers_count, is_verified, status, from_city, to_city)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (message.from_user.id,
+             data.get('full_name', message.from_user.full_name or "Клиент"),
+             phone,
+             '',        # direction - пустая строка, т.к. ещё нет заказа
+             0,         # queue_position - 0 для не в очереди
+             1,         # passengers_count - по умолчанию 1
+             1,         # is_verified
+             'registered',
+             '',        # from_city
+             ''         # to_city
+            )
         )
     
     await save_log_action(message.from_user.id, "client_registered", f"Phone: {phone}")
@@ -1454,22 +1464,44 @@ async def client_passengers_count(message: types.Message, state: FSMContext):
             )
     except ValueError:
         await message.answer("Сан енгізіңіз!")
+        
+@dp.message(ClientOrder.passengers_count)
+async def ask_order_for(message: types.Message, state: FSMContext):
+    """After entering number of passengers, ask who the order is for"""
+    try:
+        count = int(message.text)
+        if count < 1 or count > 8:
+            await message.answer("Қате! 1-ден 8-ге дейінгі санды енгізіңіз")
+            return
 
-@dp.message(ClientOrder.dropoff_location)
-async def client_dropoff(message: types.Message, state: FSMContext):
-    """Ask for whom the order is (skip address)"""
-    await state.set_state(ClientOrder.order_for)
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👤 Маған", callback_data="order_for_self")],
-        [InlineKeyboardButton(text="👥 Басқа адамға", callback_data="order_for_other")]
-    ])
-    
-    await message.answer(
-        "👤 <b>Бұл тапсырыс кімге?</b>",
-        reply_markup=keyboard,
-        parse_mode="HTML"
-    )
+        await state.update_data(passengers_count=count)
+
+        # Calculate price
+        data = await state.get_data()
+        from_city, to_city = data.get("from_city"), data.get("to_city")
+        if {"Ақтау", "Шетпе"} == {from_city, to_city}:
+            price = 2000
+        elif {"Ақтау", "Жаңаөзен"} == {from_city, to_city}:
+            price = 2500
+        else:
+            price = 0
+
+        await message.answer(f"💰 Баға: {price} теңге")
+
+        # Ask who the order is for
+        await state.set_state(ClientOrder.order_for)
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="👤 Маған", callback_data="order_for_self")],
+            [InlineKeyboardButton(text="👥 Басқа адамға", callback_data="order_for_other")]
+        ])
+        await message.answer(
+            "👤 <b>Бұл тапсырыс кімге?</b>",
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+
+    except ValueError:
+        await message.answer("Сан енгізіңіз!")
 
 
 @dp.callback_query(ClientOrder.order_for, F.data == "order_for_self")
@@ -1587,7 +1619,7 @@ async def finalize_order(callback: types.CallbackQuery, state: FSMContext):
                 driver[0],
                 f"🔔 <b>:Жаңа тапсырыс!</b>\n\n"
                 f"👥 Жолаушылар саны: {data['passengers_count']}\n"
-                f"📍 {data['pickup_location']} → {data['dropoff_location']}\n"
+                f"📍 {data['from_city']} → {data['to_city']}\n"
                 f"Кімге: {data['order_for']}\n\n"
                 f"Тапсырыстарды тексеріңіз: /driver",
                 parse_mode="HTML"
@@ -1603,11 +1635,11 @@ async def finalize_order(callback: types.CallbackQuery, state: FSMContext):
     
     await callback.message.edit_text(
         f"✅ <b>Тапсырыс #{order_number} жасалды!</b>\n\n"
-        f"📍 {data['direction']}\n"
+        f"📍 {data['from_city']} → {data['to_city']}\n"
         f"👤 Кімге: {data['order_for']}\n"
         f"👥 Жолаушылар саны: {data['passengers_count']}\n"
-        f"📍 Қайдан: {data['pickup_location']}\n"
-        f"📍 Қайда: {data['dropoff_location']}\n"
+        f"📍 Қайдан: {data['from_city']}\n"
+        f"📍 Қайда: {data['to_city']}\n"
         f"📊 Кезектегі орын: №{queue_pos}\n\n"
         f"🚗 Бос жүргізушілер: {suitable}\n\n"
         f"Тағы бір тапсырыс жасағыңыз келеді ме?",
