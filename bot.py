@@ -146,6 +146,8 @@ class DBMigration:
             DBMigration.migration_v5()
         if current_version < 6:
             DBMigration.migration_v6()
+        if current_version < 7:
+            DBMigration.migration_v7()
     
     @staticmethod
     def migration_v1():
@@ -310,9 +312,13 @@ class DBMigration:
         conn = sqlite3.connect(DATABASE_FILE)
         c = conn.cursor()
 
-        # Adding order_for field to clients (who the order is for)
+        # Get client columns first
         c.execute("PRAGMA table_info(clients)")
         client_columns = [column[1] for column in c.fetchall()]
+
+        # Get driver columns
+        c.execute("PRAGMA table_info(drivers)")
+        driver_columns = [column[1] for column in c.fetchall()]
     
         if 'order_for' not in client_columns:
             c.execute("ALTER TABLE clients ADD COLUMN order_for TEXT DEFAULT 'self'")
@@ -339,6 +345,22 @@ class DBMigration:
         conn.commit()
         conn.close()
         DBMigration.set_db_version(6)
+        logger.info("Migration completed")
+        
+    @staticmethod
+    def migration_v7():
+        """Migration v7: Remove unused columns"""
+        logger.info("Migration v7...")
+        conn = sqlite3.connect(DATABASE_FILE)
+        c = conn.cursor()
+    
+        # SQLite doesn't support DROP COLUMN directly, so we recreate tables
+        # But since the app works without these columns, we can skip this
+        # Just document that pickup_location and dropoff_location are deprecated
+    
+        conn.commit()
+        conn.close()
+        DBMigration.set_db_version(7)
         logger.info("Migration completed")
 
 async def init_db():
@@ -844,7 +866,7 @@ async def accept_client(callback: types.CallbackQuery):
                 (driver_id, client_id)
             )
             client = await cursor.fetchone()
-            
+    
             if not client:
                 await callback.answer("❌ Клиентті басқа жүргізуші алып қойды!", show_alert=True)
                 return
@@ -981,10 +1003,29 @@ async def confirm_change_city(callback: types.CallbackQuery):
     new_city = city_map[callback.data]
     
     async with get_db(write=True) as db:
+        # Get old direction
+        async with db.execute("SELECT direction FROM drivers WHERE user_id=?", (callback.from_user.id,)) as cursor:
+            old_city = (await cursor.fetchone())[0]
+    
+        # Update driver city
         await db.execute(
-            "UPDATE drivers SET direction=? WHERE user_id=?",
+            "UPDATE drivers SET direction=?, queue_position=0 WHERE user_id=?",
             (new_city, callback.from_user.id)
         )
+    
+        # Reorder queues for both old and new cities
+        for city in [old_city, new_city]:
+            async with db.execute(
+                "SELECT user_id FROM drivers WHERE direction=? ORDER BY queue_position",
+                (city,)
+            ) as cursor:
+                drivers = await cursor.fetchall()
+        
+            for pos, (driver_id,) in enumerate(drivers, 1):
+                await db.execute(
+                    "UPDATE drivers SET queue_position=? WHERE user_id=?",
+                    (pos, driver_id)
+                )
     
     await save_log_action(callback.from_user.id, "city_changed", f"New city: {new_city}")
     
@@ -1153,9 +1194,8 @@ async def client_phone_number(message: types.Message, state: FSMContext):
         await db.execute(
             '''INSERT OR REPLACE INTO clients
                (user_id, full_name, phone, direction, queue_position,
-                passengers_count, is_verified, status, from_city, to_city,
-                pickup_location, dropoff_location)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                passengers_count, is_verified, status, from_city, to_city)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             (message.from_user.id,
              data.get('full_name', message.from_user.full_name or "Клиент"),
              phone,
@@ -1165,11 +1205,11 @@ async def client_phone_number(message: types.Message, state: FSMContext):
              1,         # is_verified
              'registered',
              '',        # from_city
-             '',        # to_city
-             '',        # pickup_location - add empty string
-             ''         # dropoff_location - add empty string
+             ''         # to_city
             )
         )
+
+
     
     await save_log_action(message.from_user.id, "client_registered", f"Phone: {phone}")
     
@@ -1408,12 +1448,13 @@ async def client_passengers_count(message: types.Message, state: FSMContext):
     try:
         count = int(message.text)
         if count < 1 or count > 8:
-            await message.answer("Қате! 1-ден 8-ге дейінгі сандды енгізіңіз")
+            await message.answer("Қате! 1-ден 8-ге дейінгі санды енгізіңіз")
             return
         
         data = await state.get_data()
         from_city, to_city = data.get("from_city"), data.get("to_city")
 
+        # Calculate price
         if {"Ақтау", "Шетпе"} == {from_city, to_city}:
             price = 2000 * count
         elif {"Ақтау", "Жаңаөзен"} == {from_city, to_city}:
@@ -1761,8 +1802,7 @@ async def add_another_order_no(callback: types.CallbackQuery, state: FSMContext)
     
     await callback.message.edit_text(
         f"✅ <b>Дайын!</b>\n\n"
-        f"Сіздің {total_orders} белсенді тапсырысыңыз бар.\n\n"
-        f"Статусты қарау үшін /driver командасын пайдаланыңыз.",
+        f"Сіздің {total_orders} белсенді тапсырысыңыз бар.\n\n",
         parse_mode="HTML"
     )
     await state.clear()
