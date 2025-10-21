@@ -1627,7 +1627,6 @@ async def finalize_order(callback: types.CallbackQuery, state: FSMContext):
              data['order_for'],
              order_number,
              callback.from_user.id))
-
         
         # Check suitable drivers
         async with db.execute(
@@ -1647,6 +1646,7 @@ async def finalize_order(callback: types.CallbackQuery, state: FSMContext):
         ) as cursor:
             drivers = await cursor.fetchall()
     
+    # Everything below here is OUTSIDE the db context manager
     await save_log_action(
         callback.from_user.id,
         "order_created",
@@ -1658,11 +1658,11 @@ async def finalize_order(callback: types.CallbackQuery, state: FSMContext):
         try:
             await bot.send_message(
                 driver[0],
-                f"🔔 <b>:Жаңа тапсырыс!</b>\n\n"
+                f"🔔 <b>Жаңа тапсырыс!</b>\n\n"
                 f"👥 Жолаушылар саны: {data['passengers_count']}\n"
                 f"📍 {data['from_city']} → {data['to_city']}\n"
                 f"Кімге: {data['order_for']}\n\n"
-                f"Тапсырыстарды тексеріңіз: /driver",
+                f"Мәзірге өту үшін 🚗 Жүргізуші ретінде кіру батырмасын басыңыз",
                 parse_mode="HTML"
             )
         except:
@@ -1670,7 +1670,7 @@ async def finalize_order(callback: types.CallbackQuery, state: FSMContext):
     
     # Offer to add another order
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Жаңа тапсырып жасау", callback_data="add_another_yes")],
+        [InlineKeyboardButton(text="➕ Жаңа тапсырыс жасау", callback_data="add_another_yes")],
         [InlineKeyboardButton(text="✅ Аяқтау", callback_data="add_another_no")]
     ])
     
@@ -1679,8 +1679,6 @@ async def finalize_order(callback: types.CallbackQuery, state: FSMContext):
         f"📍 {data['from_city']} → {data['to_city']}\n"
         f"👤 Кімге: {data['order_for']}\n"
         f"👥 Жолаушылар саны: {data['passengers_count']}\n"
-        f"📍 Қайдан: {data['from_city']}\n"
-        f"📍 Қайда: {data['to_city']}\n"
         f"📊 Кезектегі орын: №{queue_pos}\n\n"
         f"🚗 Бос жүргізушілер: {suitable}\n\n"
         f"Тағы бір тапсырыс жасағыңыз келеді ме?",
@@ -1783,7 +1781,35 @@ async def finalize_order_from_message(message: types.Message, state: FSMContext)
     )
     await state.set_state(ClientOrder.add_another)
 
-@dp.callback_query(ClientOrder.add_another, F.data == "add_another_yes")
+@dp.callback_query(F.data == "add_another_yes")
+async def add_another_order_callback(callback: types.CallbackQuery, state: FSMContext):
+    """Add another taxi order"""
+    await callback.message.edit_text(
+        "🧍‍♂️ <b>Жаңа тапсырыс</b>\n\n"
+        "Қай қаладан шығасыз?",
+        reply_markup=from_city_keyboard(),
+        parse_mode="HTML"
+    )
+    await state.set_state(ClientOrder.from_city)
+    await callback.answer()
+
+@dp.callback_query(F.data == "add_another_no")
+async def finish_ordering(callback: types.CallbackQuery, state: FSMContext):
+    """End order process"""
+    total_orders = await count_user_orders(callback.from_user.id)
+    
+    await callback.message.edit_text(
+        f"✅ <b>Дайын!</b>\n\n"
+        f"Сіздің {total_orders} белсенді тапсырысыңыз бар.\n\n"
+        f"Статусты қарау үшін:\n"
+        f"• Басты мәзірден 🧍‍♂️ Такси шақыру батырмасын басыңыз\n"
+        f"• Содан кейін \"Менің тапсырыстарым\" таңдаңыз",
+        parse_mode="HTML"
+    )
+    await state.clear()
+    await callback.answer()
+
+@dp.callback_query(F.data == "add_another_yes")
 async def add_another_order_yes(callback: types.CallbackQuery, state: FSMContext):
     """Add another taxi order"""
     await callback.message.edit_text(
@@ -1795,7 +1821,7 @@ async def add_another_order_yes(callback: types.CallbackQuery, state: FSMContext
     await state.set_state(ClientOrder.from_city)
     await callback.answer()
 
-@dp.callback_query(ClientOrder.add_another, F.data == "add_another_no")
+@dp.callback_query(F.data == "add_another_no")
 async def add_another_order_no(callback: types.CallbackQuery, state: FSMContext):
     """End order process"""
     total_orders = await count_user_orders(callback.from_user.id)
