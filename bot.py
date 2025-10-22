@@ -1635,7 +1635,29 @@ async def client_select_seats(callback: types.CallbackQuery, state: FSMContext):
             parse_mode="HTML")
     
     await callback.answer()
-
+    
+@dp.callback_query(F.data == "order_for_self")
+async def order_for_self(callback: types.CallbackQuery, state: FSMContext):
+    """Order for self"""
+    data = await state.get_data()
+    
+    # ✅ Debug logging
+    logger.info(f"order_for_self - State data: {data}")
+    
+    # ✅ Safety check
+    if 'passengers_count' not in data:
+        logger.error(f"Missing passengers_count in state: {data}")
+        await callback.answer("❌ Қате: жолаушылар саны таңдалмаған", show_alert=True)
+        await callback.message.edit_text(
+            "Қате орын алды. Қайтадан бастаңыз:",
+            reply_markup=from_city_keyboard()
+        )
+        await state.clear()
+        return
+    
+    await state.update_data(order_for="Маған")
+    await callback.answer()
+    await finalize_order(callback, state)
 
 @dp.callback_query(F.data == "back_from_city")
 async def back_from_city(callback: types.CallbackQuery, state: FSMContext):
