@@ -22,7 +22,7 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 DATABASE_FILE = os.getenv("DATABASE_FILE", "taxi_bot.db")
-DB_TIMEOUT = 10.0
+DB_TIMEOUT = 30.0
 
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
@@ -680,67 +680,82 @@ async def driver_passengers(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "driver_available_orders")
 async def driver_available_orders(callback: types.CallbackQuery):
     """Show available orders for the driver based on their current city"""
-    async with get_db() as db:
-        # direction from driver = current_city
-        async with db.execute("SELECT direction FROM drivers WHERE user_id=?",
-                              (callback.from_user.id, )) as cursor:
-            driver_city = (await cursor.fetchone())[0]
+    # Answer immediately to prevent timeout
+    await callback.answer("⏳ Жүктелуде...")
+    
+    try:
+        async with get_db() as db:
+            # Get driver's current city
+            async with db.execute("SELECT direction FROM drivers WHERE user_id=?",
+                                  (callback.from_user.id, )) as cursor:
+                result = await cursor.fetchone()
+                
+            if not result:
+                await callback.message.edit_text("❌ Жүргізуші табылмады")
+                return
+                
+            driver_city = result[0]
+            logger.info(f"Driver {callback.from_user.id} city: {driver_city}")
 
-        occupied, total, available = await get_driver_available_seats(
-            callback.from_user.id)
+        # Get available seats (outside the db context)
+        occupied, total, available = await get_driver_available_seats(callback.from_user.id)
+        logger.info(f"Driver seats: {occupied}/{total}, available: {available}")
 
-        # Show orders, where from_city matches driver's current city
-        async with db.execute(
-            '''SELECT user_id, full_name, passengers_count, queue_position, direction, from_city, to_city
-                     FROM clients
-                     WHERE from_city=? AND status='waiting'
-                     ORDER BY queue_position''', (driver_city, )) as cursor:
-            clients = await cursor.fetchall()
+        # Get waiting clients
+        async with get_db() as db:
+            async with db.execute(
+                '''SELECT user_id, full_name, passengers_count, queue_position, 
+                          direction, from_city, to_city
+                   FROM clients
+                   WHERE from_city=? AND status='waiting'
+                   ORDER BY queue_position''', (driver_city, )) as cursor:
+                clients = await cursor.fetchall()
 
-    if not clients:
-        msg = f"❌ Cіздің қалаңыздан шығатын тапсырыстар жоқ {driver_city}\n\n💺 Бос орындар: {available}"
-    else:
+        logger.info(f"Found {len(clients)} waiting clients")
+
+        if not clients:
+            msg = f"❌ Сіздің қалаңыздан шығатын тапсырыстар жоқ: {driver_city}\n\n💺 Бос орындар: {available}"
+            await callback.message.edit_text(
+                msg,
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="🔙 Артқа", callback_data="driver_menu")
+                ]]),
+                parse_mode="HTML")
+            return
+
         msg = f"🔔 <b>{driver_city} қаласынан шығатын тапсырыстар:</b>\n"
         msg += f"💺 Бос орындар: {available}\n\n"
 
         keyboard_buttons = []
         for client in clients:
-            can_fit = client[4] <= available
+            can_fit = client[2] <= available
             fit_emoji = "✅" if can_fit else "⚠️"
             warning = "" if can_fit else " (орын жетпейді!)"
 
-            # client[6] = direction (толық маршрут), client[8] = to_city
-            msg += f"{fit_emoji} №{client[5]} - {client[1]} ({client[4]} адам.){warning}\n"
-            msg += f"   🎯 {client[6]}\n"  # Толық маршрут
-            msg += f"   📍 {client[2]} → {client[3]}\n\n"
+            msg += f"{fit_emoji} №{client[3]} - {client[1]} ({client[2]} адам.){warning}\n"
+            msg += f"   🎯 {client[4]}\n"
+            msg += f"   📍 {client[5]} → {client[6]}\n\n"
 
-            button_text = f"✅ №{client[5]} алу ({client[4]} адам.)"
+            button_text = f"✅ №{client[3]} алу ({client[2]} адам.)"
             if not can_fit:
-                button_text = f"⚠️ №{client[5]} алу ({client[4]} адам.) - орын жетпейді!"
+                button_text = f"⚠️ №{client[3]} алу ({client[2]} адам.) - орын жетпейді!"
 
             keyboard_buttons.append([
-                InlineKeyboardButton(
-                    text=button_text,
-                    callback_data=f"accept_client_{client[0]}")
+                InlineKeyboardButton(text=button_text, callback_data=f"accept_client_{client[0]}")
             ])
 
         keyboard_buttons.append([
             InlineKeyboardButton(text="🔙 Артқа", callback_data="driver_menu")
         ])
 
-        await callback.message.edit_text(msg,
-                                         reply_markup=InlineKeyboardMarkup(
-                                             inline_keyboard=keyboard_buttons),
-                                         parse_mode="HTML")
-        return
-
-    await callback.message.edit_text(
-        msg,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="🔙 Артқа", callback_data="driver_menu")
-        ]]),
-        parse_mode="HTML")
-    await callback.answer()
+        await callback.message.edit_text(
+            msg,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_buttons),
+            parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error(f"Error in driver_available_orders: {e}", exc_info=True)
+        await callback.message.answer(f"❌ Қате: {str(e)}")
 
 
 @dp.callback_query(F.data.startswith("accept_client_"))
@@ -751,42 +766,49 @@ async def accept_client(callback: types.CallbackQuery):
 
     try:
         async with get_db(write=True) as db:
-            cursor = await db.execute(
-                '''UPDATE clients 
-                   SET status='accepted', assigned_driver_id=? 
-                   WHERE user_id=? AND status='waiting'
-                   RETURNING passengers_count, full_name, direction''',
-                (driver_id, client_id))
-            client = await cursor.fetchone()
+            # Get client data
+            async with db.execute(
+                '''SELECT passengers_count, full_name, direction, from_city, to_city, phone, order_for
+                   FROM clients 
+                   WHERE user_id=? AND status='waiting' ''',
+                (client_id,)) as cursor:
+                client = await cursor.fetchone()
 
             if not client:
-                await callback.answer("❌ Клиентті басқа жүргізуші алып қойды!",
-                                      show_alert=True)
+                await callback.answer("❌ Клиентті басқа жүргізуші алып қойды!", show_alert=True)
                 return
 
-            passengers_count, full_name, direction = client
+            passengers_count = client[0]
+            client_name = client[1]
+            direction = client[2]
+            from_city = client[3]
+            to_city = client[4]
+            client_phone = client[5] if client[5] and not client[5].startswith("tg_") else "Нөмір көрсетілмеген"
+            order_for_info = client[6] if len(client) > 6 else "Өзіне"
 
-            # Check available seats
-            cursor = await db.execute(
-                "SELECT total_seats, COALESCE(occupied_seats, 0), car_model, car_number FROM drivers WHERE user_id=?",
-                (driver_id, ))
-            driver_data = await cursor.fetchone()
+            # Check driver's available seats
+            async with db.execute(
+                "SELECT total_seats, COALESCE(occupied_seats, 0), car_model, car_number, phone FROM drivers WHERE user_id=?",
+                (driver_id,)) as cursor:
+                driver_data = await cursor.fetchone()
 
             if not driver_data:
                 await callback.answer("❌ Қате: жүргізуші жоқ", show_alert=True)
                 return
 
-            total, occupied, car_model, car_number = driver_data
+            total, occupied, car_model, car_number, driver_phone = driver_data
             available = total - occupied
 
             if passengers_count > available:
-                await db.execute(
-                    "UPDATE clients SET status='waiting', assigned_driver_id=NULL WHERE user_id=?",
-                    (client_id, ))
                 await callback.answer(
                     f"❌ Орын жетпейді! {passengers_count} орын қажет, {available} орын бар",
                     show_alert=True)
                 return
+
+            # Update client status
+            await db.execute(
+                "UPDATE clients SET status='accepted', assigned_driver_id=? WHERE user_id=?",
+                (driver_id, client_id))
 
             # Update occupied seats
             await db.execute(
@@ -800,52 +822,32 @@ async def accept_client(callback: types.CallbackQuery):
                    VALUES (?, ?, ?, 'accepted', ?)''',
                 (driver_id, client_id, direction, passengers_count))
 
-        await save_log_action(driver_id, "client_accepted",
-                              f"Client: {client_id}")
-
-        # Get driver and client contact info
-        async with get_db() as db:
-            async with db.execute("SELECT phone FROM drivers WHERE user_id=?",
-                                  (driver_id, )) as cursor:
-                driver_phone = (await cursor.fetchone())[0]
-            async with db.execute(
-                    "SELECT phone, order_for, full_name FROM clients WHERE user_id=?",
-                (client_id, )) as cursor:
-                client_data = await cursor.fetchone()
-                client_phone = client_data[0] if client_data else "N/A"
-                order_for_info = client_data[1] if client_data and len(
-                    client_data) > 1 else "Өзіне"
-                client_full_name = client_data[2] if client_data and len(
-                    client_data) > 2 else full_name
+        await save_log_action(driver_id, "client_accepted", f"Client: {client_id}")
 
         # Notify client
         try:
             await bot.send_message(
-                client_id, f"✅ <b>Жүргізуші тапсырысыңызды қабылдады!</b>\n\n"
+                client_id, 
+                f"✅ <b>Жүргізуші тапсырысыңызды қабылдады!</b>\n\n"
                 f"🚗 {car_model} ({car_number})\n"
-                f"📍 {direction}\n\n"
+                f"📍 {from_city} → {to_city}\n\n"
                 f"📞 Жүргізуші байланысы: {driver_phone}\n\n"
                 f"Жүргізушінің қоңырауын күтіңіз!",
                 parse_mode="HTML")
-        except:
-            pass
+        except Exception as e:
+            logger.warning(f"Couldn't notify client {client_id}: {e}")
 
-        # Notify driver with passenger contact
-        try:
-            await bot.send_message(
-                driver_id, f"✅ <b>Тапсырыс қабылданды!</b>\n\n"
-                f"👤 Жолаушы: {client_full_name}\n"
-                f"📞 Байланыс: {client_phone}\n"
-                f"📍 {data['from_city']} → {data['to_city']}\n"
-                f"👥 Орын: {passengers_count}\n"
-                f"ℹ️ Кімге: {order_for_info}",
-                parse_mode="HTML")
-        except:
-            pass
+        # Notify driver
+        await callback.message.edit_text(
+            f"✅ <b>Тапсырыс қабылданды!</b>\n\n"
+            f"👤 Жолаушы: {client_name}\n"
+            f"📞 Байланыс: {client_phone}\n"
+            f"📍 {from_city} → {to_city}\n"
+            f"👥 Орын: {passengers_count}\n"
+            f"ℹ️ Кімге: {order_for_info}",
+            parse_mode="HTML")
 
-        await callback.answer(f"✅ Клиент {full_name} қосылды!",
-                              show_alert=True)
-        await driver_available_orders(callback)
+        await callback.answer(f"✅ Клиент {client_name} қосылды!", show_alert=True)
 
     except Exception as e:
         logger.error(f"Error in accept_client: {e}", exc_info=True)
