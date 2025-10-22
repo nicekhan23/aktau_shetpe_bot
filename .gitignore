@@ -66,6 +66,7 @@ htmlcov/
 .tox/
 
 # Temporary files
+*.~lock..env#
 *.tmp
 *.temp
 tmp/
