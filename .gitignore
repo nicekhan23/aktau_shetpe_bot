@@ -31,7 +31,8 @@ env/
 *.db-journal
 *.sqlite
 *.sqlite3
-taxi_bot.db
+*.db-wal
+*.db-shm
 
 # Environment variables
 .env
