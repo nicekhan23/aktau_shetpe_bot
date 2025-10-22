@@ -1585,7 +1585,8 @@ async def client_to_city(callback: types.CallbackQuery, state: FSMContext):
 async def client_select_seats(callback: types.CallbackQuery, state: FSMContext):
     count = int(callback.data.split("_")[1])
     data = await state.get_data()
-    from_city, to_city = data.get("from_city"), data.get("to_city")
+    from_city = data.get("from_city")
+    to_city = data.get("to_city")
 
     # Calculate price
     if {"Ақтау", "Шетпе"} == {from_city, to_city}:
@@ -1595,8 +1596,18 @@ async def client_select_seats(callback: types.CallbackQuery, state: FSMContext):
     else:
         price = 0
 
-    # ✅ FIX: Save passengers_count to state
+    # ✅ CRITICAL: Save passengers_count to state
     await state.update_data(passengers_count=count)
+    
+    # Check suitable drivers
+    async with get_db() as db:
+        async with db.execute(
+            '''SELECT COUNT(*) FROM drivers 
+               WHERE direction=? AND is_active=1 
+               AND (total_seats - COALESCE(occupied_seats, 0)) >= ?''',
+            (from_city, count)) as cursor:
+            suitable_cars = (await cursor.fetchone())[0]
+    
     await state.set_state(ClientOrder.order_for)
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -1604,12 +1615,25 @@ async def client_select_seats(callback: types.CallbackQuery, state: FSMContext):
         [InlineKeyboardButton(text="👥 Басқа адамға", callback_data="order_for_other")]
     ])
 
-    await callback.message.edit_text(
-        f"✅ Жолаушылар саны: {count}\n"
-        f"💰 Баға: {price} теңге\n\n"
-        f"👤 <b>Бұл тапсырыс кімге?</b>",
-        reply_markup=keyboard,
-        parse_mode="HTML")
+    if suitable_cars == 0:
+        await callback.message.edit_text(
+            f"⚠️ Жолаушылар саны: {count}\n"
+            f"💰 Баға: {price} теңге\n"
+            f"⚠️ Қазір {count} бос орны бар көліктер жоқ\n\n"
+            f"Бірақ сіздің тапсырысыңыз сақталады!\n"
+            f"Жүргізушілер оны бос орындар пайда болғанда көретін болады.\n\n"
+            f"👤 <b>Бұл тапсырыс кімге?</b>",
+            reply_markup=keyboard,
+            parse_mode="HTML")
+    else:
+        await callback.message.edit_text(
+            f"✅ Жолаушылар саны: {count}\n"
+            f"💰 Баға: {price} теңге\n"
+            f"🚗 Бос жүргізушілер: {suitable_cars}\n\n"
+            f"👤 <b>Бұл тапсырыс кімге?</b>",
+            reply_markup=keyboard,
+            parse_mode="HTML")
+    
     await callback.answer()
 
 
@@ -1619,125 +1643,6 @@ async def back_from_city(callback: types.CallbackQuery, state: FSMContext):
                                      reply_markup=from_city_keyboard())
     await state.set_state(ClientOrder.from_city)
     await callback.answer()
-
-
-@dp.message(ClientOrder.passengers_count)
-async def client_passengers_count(message: types.Message, state: FSMContext):
-    try:
-        count = int(message.text)
-        if count < 1 or count > 8:
-            await message.answer("Қате! 1-ден 8-ге дейінгі санды енгізіңіз")
-            return
-
-        data = await state.get_data()
-        from_city, to_city = data.get("from_city"), data.get("to_city")
-
-        # Calculate price
-        if {"Ақтау", "Шетпе"} == {from_city, to_city}:
-            price = 2000 * count
-        elif {"Ақтау", "Жаңаөзен"} == {from_city, to_city}:
-            price = 2500 * count
-        else:
-            price = 0
-
-        await message.answer(f"💰 Баға: {price} теңге")
-
-        # Check suitable cars
-        async with get_db() as db:
-            async with db.execute(
-                    '''SELECT COUNT(*) 
-                         FROM drivers 
-                         WHERE direction=? AND is_active=1 
-                         AND (total_seats - occupied_seats) >= ?''',
-                (data['from_city'], count)) as cursor:
-                suitable_cars = (await cursor.fetchone())[0]
-
-        await state.update_data(passengers_count=count)
-
-        # Skip address questions and go directly to "order for whom"
-        await state.set_state(ClientOrder.order_for)
-
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[[
-                InlineKeyboardButton(text="👤 Маған",
-                                     callback_data="order_for_self")
-            ],
-                             [
-                                 InlineKeyboardButton(
-                                     text="👥 Басқа адамға",
-                                     callback_data="order_for_other")
-                             ]])
-
-        if suitable_cars == 0:
-            await message.answer(
-                f"⚠️ Жолаушылар саны: {count}\n"
-                f"⚠️ Қазір {count} бос орны бар көліктер жоқ\n\n"
-                f"Бірақ сіздің тапсырысыңыз сақталады!\n"
-                f"Жүргізушілер оны бос орындар пайда болғанда көретін болады.\n\n"
-                f"👤 <b>Бұл тапсырыс кімге?</b>",
-                reply_markup=keyboard,
-                parse_mode="HTML")
-        else:
-            await message.answer(
-                f"✅ Жолаушылар саны: {count}\n"
-                f"🚗 Бос жүргізушілер: {suitable_cars}\n\n"
-                f"👤 <b>Бұл тапсырыс кімге?</b>",
-                reply_markup=keyboard,
-                parse_mode="HTML")
-    except ValueError:
-        await message.answer("Сан енгізіңіз!")
-
-
-@dp.message(ClientOrder.passengers_count)
-async def ask_order_for(message: types.Message, state: FSMContext):
-    """After entering number of passengers, ask who the order is for"""
-    try:
-        count = int(message.text)
-        if count < 1 or count > 8:
-            await message.answer("Қате! 1-ден 8-ге дейінгі санды енгізіңіз")
-            return
-
-        await state.update_data(passengers_count=count)
-
-        # Calculate price
-        data = await state.get_data()
-        from_city, to_city = data.get("from_city"), data.get("to_city")
-        if {"Ақтау", "Шетпе"} == {from_city, to_city}:
-            price = 2000
-        elif {"Ақтау", "Жаңаөзен"} == {from_city, to_city}:
-            price = 2500
-        else:
-            price = 0
-
-        await message.answer(f"💰 Баға: {price} теңге")
-
-        # Ask who the order is for
-        await state.set_state(ClientOrder.order_for)
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[[
-                InlineKeyboardButton(text="👤 Маған",
-                                     callback_data="order_for_self")
-            ],
-                             [
-                                 InlineKeyboardButton(
-                                     text="👥 Басқа адамға",
-                                     callback_data="order_for_other")
-                             ]])
-        await message.answer("👤 <b>Бұл тапсырыс кімге?</b>",
-                             reply_markup=keyboard,
-                             parse_mode="HTML")
-
-    except ValueError:
-        await message.answer("Сан енгізіңіз!")
-
-
-@dp.callback_query(F.data == "order_for_self")
-async def order_for_self(callback: types.CallbackQuery, state: FSMContext):
-    """Order for self"""
-    await state.update_data(order_for="Маған")
-    await callback.answer()
-    await finalize_order(callback, state)
-
 
 @dp.callback_query(F.data == "order_for_other")
 async def order_for_other(callback: types.CallbackQuery, state: FSMContext):
