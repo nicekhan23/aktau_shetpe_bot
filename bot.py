@@ -527,7 +527,8 @@ async def driver_current_city(callback: types.CallbackQuery,
         f"🚗 {data['car_model']} ({data['car_number']})\n"
         f"💺 Орын саны: {data['seats']}\n"
         f"📍 Қазіргі қала: {current_city}\n\n"
-        f"Сіз {current_city} қаласынан шығатын барлық тапсырыстарды көре аласыз",
+        f"Сіз {current_city} қаласынан шығатын барлық тапсырыстарды көре аласыз\n\n"
+        f"💡 Кеңес: Жүргізуші мәзіріне тез өту үшін /driver командасын пайдаланыңыз",
         parse_mode="HTML")
 
     await state.clear()
@@ -1275,16 +1276,16 @@ async def driver_reject_new_order(callback: types.CallbackQuery):
 async def client_start(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
 
-    # Check if client is already registered
+    # Check if client is already registered (any status)
     async with get_db() as db:
         async with db.execute(
-                "SELECT user_id FROM clients WHERE user_id=? AND status='registered'",
-            (user_id, )) as cursor:
+                "SELECT user_id FROM clients WHERE parent_user_id=? OR user_id=? LIMIT 1",
+            (user_id, user_id)) as cursor:
             client = await cursor.fetchone()
 
     if client:
-        # Client already registered, proceed to order
-        await start_new_order(message, state)
+        # Client already registered, show menu
+        await show_client_menu(message, user_id)
     else:
         # New client, need verification
         full_name = message.from_user.full_name
@@ -1354,7 +1355,10 @@ async def client_phone_number(message: types.Message, state: FSMContext):
     await save_log_action(message.from_user.id, "client_registered",
                           f"Phone: {phone}")
 
-    await message.answer("✅ Тіркелу аяқталды!")
+    await message.answer(
+        "✅ <b>Тіркелу аяқталды!</b>\n\n"
+        "💡 Кеңес: Клиент мәзіріне тез өту үшін /client командасын пайдаланыңыз",
+        parse_mode="HTML")
     await start_new_order(message, state)
 
 
@@ -1884,6 +1888,11 @@ async def finalize_order_from_message(message: types.Message,
                                       state: FSMContext):
     """Same as finalize_order but from message context"""
     data = await state.get_data()
+    
+    # Extract city info
+    from_city = data.get('from_city', '')
+    to_city = data.get('to_city', '')
+    
     current_orders = await count_user_orders(message.from_user.id)
     order_number = current_orders + 1
 
@@ -1917,9 +1926,9 @@ async def finalize_order_from_message(message: types.Message,
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'waiting', ?, ?, ?)''',
             (
                 unique_order_id,
-                callback.from_user.full_name or "Клиент",
-                f"@{callback.from_user.username}" if
-                callback.from_user.username else f"tg_{callback.from_user.id}",
+                message.from_user.full_name or "Клиент",
+                f"@{message.from_user.username}" if
+                message.from_user.username else f"tg_{message.from_user.id}",
                 direction,  # <-- Use the variable instead of data['direction']
                 data['from_city'],
                 data['to_city'],
@@ -1927,7 +1936,7 @@ async def finalize_order_from_message(message: types.Message,
                 data['passengers_count'],
                 data['order_for'],
                 order_number,
-                callback.from_user.id))
+                message.from_user.id))
 
         async with db.execute(
                 '''SELECT COUNT(*) FROM drivers 
@@ -1946,17 +1955,38 @@ async def finalize_order_from_message(message: types.Message,
     await save_log_action(message.from_user.id, "order_created",
                           f"Order #{order_number} for {data['order_for']}")
 
+    # Get drivers to notify (outside write context)
+    async with get_db() as db:
+        async with db.execute(
+                '''SELECT user_id FROM drivers 
+               WHERE direction=? AND is_active=1 
+               AND (total_seats - COALESCE(occupied_seats, 0)) >= ?''',
+            (from_city, data['passengers_count'])) as cursor:
+            drivers = await cursor.fetchall()
+
+    # Notify drivers
     for driver in drivers:
         try:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="✅ Қабылдау",
+                    callback_data=f"accept_client_{unique_order_id}"
+                ),
+                InlineKeyboardButton(
+                    text="❌ Бас тарту",
+                    callback_data=f"driver_reject_{unique_order_id}")
+            ]])
+
             await bot.send_message(
                 driver[0], f"🔔 <b>Жаңа тапсырыс!</b>\n\n"
                 f"👥 Жолаушылар саны: {data['passengers_count']}\n"
-                f"📍 {data['direction']}\n"
+                f"📍 {from_city} → {to_city}\n"
                 f"Кімге: {data['order_for']}\n\n"
-                f"Тапсырыстарды тексеріңіз: /driver",
+                f"Төмендегі батырмалардың бірін таңдаңыз:",
+                reply_markup=keyboard,
                 parse_mode="HTML")
-        except:
-            pass
+        except Exception as e:
+            logger.warning(f"Couldn't notify driver {driver[0]}: {e}")
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="➕ Жаңа тапсырыс жасау",
@@ -1966,10 +1996,9 @@ async def finalize_order_from_message(message: types.Message,
 
     await message.answer(
         f"✅ <b>Тапсырыс #{order_number} жасалды!</b>\n\n"
-        f"📍 {data['direction']}\n"
+        f"📍 {from_city} → {to_city}\n"
         f"👤 Кімге: {data['order_for']}\n"
         f"👥 Жолаушылар саны: {data['passengers_count']}\n"
-        f"📍 {data['direction']}\n"
         f"📊 Кезектгі орын: №{queue_pos}\n\n"
         f"🚗 Бос жүргізушілер: {suitable}\n\n"
         f"Тағы бір тапсырыс жасағыңыз келеді ме?",
@@ -2043,8 +2072,8 @@ async def show_client_menu(message: types.Message, user_id: int):
     """Show client profile and menu"""
     async with get_db() as db:
         async with db.execute(
-            "SELECT full_name, phone, avg_rating, rating_count FROM clients WHERE user_id=? LIMIT 1",
-            (user_id,)) as cursor:
+            "SELECT full_name, phone, avg_rating, rating_count FROM clients WHERE parent_user_id=? OR user_id=? LIMIT 1",
+            (user_id, user_id)) as cursor:
             client = await cursor.fetchone()
     
     if not client:
@@ -2085,56 +2114,62 @@ async def show_client_menu(message: types.Message, user_id: int):
 
 @dp.message(F.text == "⭐ Профиль")
 async def show_profile(message: types.Message):
+    user_id = message.from_user.id
+    
     async with get_db() as db:
+        # Check if user is a driver
         async with db.execute(
-                "SELECT avg_rating, rating_count FROM drivers WHERE user_id=?",
-            (message.from_user.id, )) as cursor:
+                "SELECT user_id FROM drivers WHERE user_id=?",
+            (user_id, )) as cursor:
             driver = await cursor.fetchone()
 
+        # Check if user is a client
         async with db.execute(
-                "SELECT avg_rating, rating_count FROM clients WHERE user_id=?",
-            (message.from_user.id, )) as cursor:
+                "SELECT user_id FROM clients WHERE parent_user_id=? OR user_id=? LIMIT 1",
+            (user_id, user_id)) as cursor:
             client = await cursor.fetchone()
 
+    # No profile found
     if not driver and not client:
         await message.answer("❌ Сіздің профиліңіз табылмады.")
         return
 
-    msg = "⭐ <b>Сіздің профиліңіз</b>\n\n"
+    # Both profiles exist - ask which one to show
+    if driver and client:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🚗 Жүргізуші профилі", callback_data="profile_driver")],
+            [InlineKeyboardButton(text="🧍‍♂️ Клиент профилі", callback_data="profile_client")]
+        ])
+        await message.answer(
+            "👤 <b>Қай профильді көргіңіз келеді?</b>",
+            reply_markup=keyboard,
+            parse_mode="HTML")
+        return
 
+    # Only driver profile
     if driver:
-        msg += f"<b>Жүргізуші ретінде:</b>\n"
-        msg += f"{get_rating_stars(driver[0] or 0)}\n"
-        msg += f"📊 Бағалар: {driver[1] or 0}\n\n"
+        await show_driver_menu(message, user_id)
+        return
 
+    # Only client profile
     if client:
-        msg += f"<b>Клиент ретінде:</b>\n"
-        msg += f"{get_rating_stars(client[0] or 0)}\n"
-        msg += f"📊 Бағалар: {client[1] or 0}\n\n"
+        await show_client_menu(message, user_id)
+        return
+    
+@dp.callback_query(F.data == "profile_driver")
+async def show_driver_profile(callback: types.CallbackQuery):
+    """Show driver profile from profile selection"""
+    await callback.message.delete()
+    await show_driver_menu(callback.message, callback.from_user.id)
+    await callback.answer()
 
-    async with get_db() as db:
-        async with db.execute(
-                '''SELECT from_user_id, rating, review, created_at 
-                     FROM ratings WHERE to_user_id=? 
-                     ORDER BY created_at DESC LIMIT 5''',
-            (message.from_user.id, )) as cursor:
-            reviews = await cursor.fetchall()
 
-    if reviews:
-        msg += "<b>Соңғы пікірлер:</b>\n"
-        for review in reviews:
-            stars = "⭐" * review[1]
-            msg += f"\n{stars}\n"
-            if review[2]:
-                msg += f"💬 {review[2]}\n"
-
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✍️ Пікір қалдыру",
-                             callback_data="rate_start")
-    ]])
-
-    await message.answer(msg, reply_markup=keyboard, parse_mode="HTML")
-
+@dp.callback_query(F.data == "profile_client")
+async def show_client_profile(callback: types.CallbackQuery):
+    """Show client profile from profile selection"""
+    await callback.message.delete()
+    await show_client_menu(callback.message, callback.from_user.id)
+    await callback.answer()
 
 @dp.callback_query(F.data == "rate_start")
 async def rate_start(callback: types.CallbackQuery, state: FSMContext):
@@ -2654,6 +2689,7 @@ async def handle_unknown(message: types.Message):
     await message.answer(
         "❓ <b>Мен бұл команданы түсінбедім.</b>\n\n"
         "Меню батырмаларын пайдаланыңыз:",
+        parse_mode="HTML",
         reply_markup=main_menu_keyboard())
 
 # ==================== START ====================
