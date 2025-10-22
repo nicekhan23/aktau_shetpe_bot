@@ -1595,6 +1595,7 @@ async def client_select_seats(callback: types.CallbackQuery, state: FSMContext):
     else:
         price = 0
 
+    # ✅ FIX: Save passengers_count to state
     await state.update_data(passengers_count=count)
     await state.set_state(ClientOrder.order_for)
 
