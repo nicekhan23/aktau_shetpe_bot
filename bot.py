@@ -1940,33 +1940,6 @@ async def finish_ordering(callback: types.CallbackQuery, state: FSMContext):
         parse_mode="HTML")
     await state.clear()
     await callback.answer()
-
-
-@dp.callback_query(F.data == "add_another_yes")
-async def add_another_order_yes(callback: types.CallbackQuery,
-                                state: FSMContext):
-    """Add another taxi order"""
-    await callback.message.edit_text(
-        "🧍‍♂️ <b>Жаңа тапсырыс</b>\n\n"
-        "Қай қаладан шығасыз?",
-        reply_markup=from_city_keyboard(),
-        parse_mode="HTML")
-    await state.set_state(ClientOrder.from_city)
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "add_another_no")
-async def add_another_order_no(callback: types.CallbackQuery,
-                               state: FSMContext):
-    """End order process"""
-    total_orders = await count_user_orders(callback.from_user.id)
-
-    await callback.message.edit_text(
-        f"✅ <b>Дайын!</b>\n\n"
-        f"Сіздің {total_orders} белсенді тапсырысыңыз бар.\n\n",
-        parse_mode="HTML")
-    await state.clear()
-    await callback.answer()
     
 @dp.message(Command("client"))
 async def cmd_client(message: types.Message):
