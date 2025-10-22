@@ -765,10 +765,11 @@ async def accept_client(callback: types.CallbackQuery):
     driver_id = callback.from_user.id
 
     try:
-        async with get_db(write=True) as db:
+        # First, get all needed data in one db context
+        async with get_db() as db:
             # Get client data
             async with db.execute(
-                '''SELECT passengers_count, full_name, direction, from_city, to_city, phone, order_for
+                '''SELECT passengers_count, full_name, direction, from_city, to_city, phone, order_for, parent_user_id
                    FROM clients 
                    WHERE user_id=? AND status='waiting' ''',
                 (client_id,)) as cursor:
@@ -785,6 +786,7 @@ async def accept_client(callback: types.CallbackQuery):
             to_city = client[4]
             client_phone = client[5] if client[5] and not client[5].startswith("tg_") else "Нөмір көрсетілмеген"
             order_for_info = client[6] if len(client) > 6 else "Өзіне"
+            parent_user_id = client[7] if len(client) > 7 else client_id
 
             # Check driver's available seats
             async with db.execute(
@@ -805,6 +807,8 @@ async def accept_client(callback: types.CallbackQuery):
                     show_alert=True)
                 return
 
+        # Now update everything in a write context
+        async with get_db(write=True) as db:
             # Update client status
             await db.execute(
                 "UPDATE clients SET status='accepted', assigned_driver_id=? WHERE user_id=?",
@@ -824,7 +828,7 @@ async def accept_client(callback: types.CallbackQuery):
 
         await save_log_action(driver_id, "client_accepted", f"Client: {client_id}")
 
-        # Notify client
+        # Notify client (the actual order user_id)
         try:
             await bot.send_message(
                 client_id, 
@@ -836,6 +840,20 @@ async def accept_client(callback: types.CallbackQuery):
                 parse_mode="HTML")
         except Exception as e:
             logger.warning(f"Couldn't notify client {client_id}: {e}")
+
+        # Also notify parent user if this is a sub-order
+        if parent_user_id and parent_user_id != client_id:
+            try:
+                await bot.send_message(
+                    parent_user_id,
+                    f"✅ <b>Жүргізуші сіздің тапсырысыңызды қабылдады!</b>\n\n"
+                    f"🚗 {car_model} ({car_number})\n"
+                    f"📍 {from_city} → {to_city}\n"
+                    f"📞 Жүргізуші: {driver_phone}\n"
+                    f"👤 Кімге: {client_name}",
+                    parse_mode="HTML")
+            except Exception as e:
+                logger.warning(f"Couldn't notify parent {parent_user_id}: {e}")
 
         # Notify driver
         await callback.message.edit_text(
@@ -950,7 +968,7 @@ async def driver_complete_trip(callback: types.CallbackQuery):
     async with get_db(write=True) as db:
         # Get all clients in the trip
         async with db.execute(
-                '''SELECT user_id, passengers_count 
+                '''SELECT user_id, passengers_count, full_name, parent_user_id
                      FROM clients 
                      WHERE assigned_driver_id=? AND status IN ('accepted', 'driver_arrived')''',
             (callback.from_user.id, )) as cursor:
@@ -961,6 +979,13 @@ async def driver_complete_trip(callback: types.CallbackQuery):
             return
 
         total_freed = sum(c[1] for c in clients)
+
+        # Get trip IDs before completing
+        async with db.execute(
+            '''SELECT id FROM trips 
+               WHERE driver_id=? AND status IN ('accepted', 'driver_arrived')''',
+            (callback.from_user.id,)) as cursor:
+            trip_ids = await cursor.fetchall()
 
         # End trips
         await db.execute(
@@ -984,19 +1009,153 @@ async def driver_complete_trip(callback: types.CallbackQuery):
     await save_log_action(callback.from_user.id, "trip_completed",
                           f"Freed {total_freed} seats")
 
+    # Notify clients with rating buttons
     for client in clients:
-        try:
-            await bot.send_message(client[0], f"✅ <b>Сапар аяқталды!</b>\n\n"
-                                   f"Жүргізушіге баға беріңіз болады:\n"
-                                   f"/rate",
-                                   parse_mode="HTML")
-        except:
-            pass
+        client_user_id = client[0]
+        parent_user_id = client[3] if len(client) > 3 else client_user_id
+        
+        # Notify the actual passenger (if it's a sub-order)
+        if client_user_id != parent_user_id:
+            try:
+                await bot.send_message(
+                    client_user_id,
+                    f"✅ <b>Сапар аяқталды!</b>\n\n"
+                    f"Рақмет, жолаушы!",
+                    parse_mode="HTML")
+            except:
+                pass
+        
+        # Notify parent user (who made the order) with rating option
+        if trip_ids:
+            trip_id = trip_ids[0][0]  # Get first trip ID
+            
+            rating_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⭐", callback_data=f"quick_rate_{trip_id}_1")],
+                [InlineKeyboardButton(text="⭐⭐", callback_data=f"quick_rate_{trip_id}_2")],
+                [InlineKeyboardButton(text="⭐⭐⭐", callback_data=f"quick_rate_{trip_id}_3")],
+                [InlineKeyboardButton(text="⭐⭐⭐⭐", callback_data=f"quick_rate_{trip_id}_4")],
+                [InlineKeyboardButton(text="⭐⭐⭐⭐⭐", callback_data=f"quick_rate_{trip_id}_5")],
+                [InlineKeyboardButton(text="❌ Кейінірек", callback_data="rate_later")]
+            ])
+            
+            try:
+                await bot.send_message(
+                    parent_user_id,
+                    f"✅ <b>Сапар аяқталды!</b>\n\n"
+                    f"Жүргізушіге баға беріңіз:",
+                    reply_markup=rating_keyboard,
+                    parse_mode="HTML")
+            except Exception as e:
+                logger.warning(f"Couldn't notify client {parent_user_id}: {e}")
 
     await callback.answer(f"✅ Сапар аяқталды! {total_freed} орын босады",
                           show_alert=True)
     await show_driver_menu(callback.message, callback.from_user.id)
+    
+@dp.callback_query(F.data.startswith("quick_rate_"))
+async def quick_rate_handler(callback: types.CallbackQuery, state: FSMContext):
+    """Handle quick rating from notification"""
+    parts = callback.data.split("_")
+    trip_id = int(parts[2])
+    rating = int(parts[3])
+    
+    # Store trip_id and rating in state
+    await state.update_data(trip_id=trip_id, rating=rating)
+    
+    # Ask if they want to leave a comment
+    comment_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✍️ Пікір жазу", callback_data="add_comment")],
+        [InlineKeyboardButton(text="✅ Пікірсіз жіберу", callback_data="skip_comment")]
+    ])
+    
+    await callback.message.edit_text(
+        f"{'⭐' * rating}\n\n"
+        f"Пікір қалдырғыңыз келе ме?",
+        reply_markup=comment_keyboard)
+    await callback.answer()
 
+
+@dp.callback_query(F.data == "add_comment")
+async def add_comment_prompt(callback: types.CallbackQuery, state: FSMContext):
+    """Prompt user to write a comment"""
+    data = await state.get_data()
+    rating = data.get('rating', 5)
+    
+    await callback.message.edit_text(
+        f"{'⭐' * rating}\n\n"
+        f"Пікіріңізді жазыңыз:")
+    await state.set_state(RatingStates.write_review)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "skip_comment")
+async def skip_comment_handler(callback: types.CallbackQuery, state: FSMContext):
+    """Submit rating without comment"""
+    data = await state.get_data()
+    trip_id = data.get('trip_id')
+    rating = data.get('rating', 5)
+    
+    await save_rating_to_db(callback.from_user.id, trip_id, rating, None)
+    
+    await callback.message.edit_text(
+        f"✅ Рақмет сіздің бағаңызға!\n\n"
+        f"{'⭐' * rating}")
+    await state.clear()
+    await callback.answer("Баға сақталды!")
+
+
+@dp.callback_query(F.data == "rate_later")
+async def rate_later_handler(callback: types.CallbackQuery):
+    """User chooses to rate later"""
+    await callback.message.edit_text(
+        "👌 Кейінірек баға беруге болады:\n"
+        "/rate командасын пайдаланыңыз")
+    await callback.answer()
+
+
+async def save_rating_to_db(user_id: int, trip_id: int, rating: int, review: str = None):
+    """Helper function to save rating to database"""
+    async with get_db(write=True) as db:
+        # Get trip details
+        async with db.execute(
+            '''SELECT driver_id, client_id FROM trips WHERE id=?''',
+            (trip_id,)) as cursor:
+            trip = await cursor.fetchone()
+        
+        if not trip:
+            logger.error(f"Trip {trip_id} not found")
+            return
+        
+        is_driver = trip[0] == user_id
+        target_id = trip[1] if is_driver else trip[0]
+        user_type = "driver" if not is_driver else "client"
+        
+        # Check if rating already exists
+        async with db.execute(
+            '''SELECT id FROM ratings 
+               WHERE from_user_id=? AND trip_id=?''',
+            (user_id, trip_id)) as cursor:
+            existing = await cursor.fetchone()
+        
+        if existing:
+            logger.warning(f"Rating already exists for trip {trip_id} from user {user_id}")
+            return
+        
+        # Insert rating
+        await db.execute(
+            '''INSERT INTO ratings (from_user_id, to_user_id, user_type, trip_id, rating, review)
+               VALUES (?, ?, ?, ?, ?, ?)''',
+            (user_id, target_id, user_type, trip_id, rating, review))
+        
+        # Update average rating
+        table = "drivers" if user_type == "driver" else "clients"
+        await db.execute(
+            f'''UPDATE {table} 
+                SET avg_rating = (SELECT AVG(rating) FROM ratings WHERE to_user_id=?),
+                    rating_count = (SELECT COUNT(*) FROM ratings WHERE to_user_id=?)
+                WHERE user_id=?''', (target_id, target_id, target_id))
+    
+    await save_log_action(user_id, "rating_submitted", f"Target: {target_id}, Rating: {rating}")
 
 @dp.callback_query(F.data == "driver_exit")
 async def driver_exit(callback: types.CallbackQuery):
@@ -1182,14 +1341,15 @@ async def client_phone_number(message: types.Message, state: FSMContext):
     phone = message.text.strip()
 
     async with get_db(write=True) as db:
+        # Use INSERT OR IGNORE to prevent duplicates
         await db.execute(
-            '''INSERT OR REPLACE INTO clients
-               (user_id, full_name, phone, direction, queue_position,
-                passengers_count, is_verified, status, from_city, to_city)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-            (message.from_user.id,
-             data.get('full_name', message.from_user.full_name
-                      or "Клиент"), phone, '', 0, 1, 1, 'registered', '', ''))
+          '''INSERT OR IGNORE INTO clients
+            (user_id, full_name, phone, direction, queue_position,
+             passengers_count, is_verified, status, from_city, to_city)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+          (message.from_user.id,
+           data.get('full_name', message.from_user.full_name or "Клиент"),
+           phone, '', 0, 1, 1, 'registered', '', ''))
 
     await save_log_action(message.from_user.id, "client_registered",
                           f"Phone: {phone}")
@@ -1386,20 +1546,65 @@ async def client_to_city(callback: types.CallbackQuery, state: FSMContext):
     # Show available drivers and seats
     async with get_db() as db:
         async with db.execute(
-                '''SELECT COUNT(*), SUM(total_seats - occupied_seats) 
-                     FROM drivers 
-                     WHERE direction=? AND is_active=1''',
-            (data['from_city'], )) as cursor:
+            '''SELECT COUNT(*), SUM(total_seats - COALESCE(occupied_seats, 0))
+               FROM drivers 
+               WHERE direction=? AND is_active=1''',
+            (data['from_city'],)) as cursor:
             result = await cursor.fetchone()
 
     drivers_count = result[0] or 0
     available_seats = result[1] or 0
 
-    await callback.message.edit_text(f"✅ Маршрут: {direction}\n\n"
-                                     f"🚗 Бос жүргізушілер: {drivers_count}\n"
-                                     f"💺 Бос орындар: {available_seats}\n\n"
-                                     f"👥 Қанша орын керек? (1-8)")
+    # Create seat selection buttons (1-8)
+    seat_buttons = []
+    for i in range(1, 9):
+        seat_buttons.append([
+            InlineKeyboardButton(text=f"👥 {i} орын", callback_data=f"seats_{i}")
+        ])
+    
+    seat_buttons.append([
+        InlineKeyboardButton(text="🔙 Артқа", callback_data="back_from_city")
+    ])
+
+    await callback.message.edit_text(
+        f"✅ Маршрут: {direction}\n\n"
+        f"🚗 Бос жүргізушілер: {drivers_count}\n"
+        f"💺 Бос орындар: {available_seats}\n\n"
+        f"👥 Қанша орын керек?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=seat_buttons))
     await state.set_state(ClientOrder.passengers_count)
+    await callback.answer()
+
+
+# Add new callback handler for seat buttons
+@dp.callback_query(ClientOrder.passengers_count, F.data.startswith("seats_"))
+async def client_select_seats(callback: types.CallbackQuery, state: FSMContext):
+    count = int(callback.data.split("_")[1])
+    data = await state.get_data()
+    from_city, to_city = data.get("from_city"), data.get("to_city")
+
+    # Calculate price
+    if {"Ақтау", "Шетпе"} == {from_city, to_city}:
+        price = 2000 * count
+    elif {"Ақтау", "Жаңаөзен"} == {from_city, to_city}:
+        price = 2500 * count
+    else:
+        price = 0
+
+    await state.update_data(passengers_count=count)
+    await state.set_state(ClientOrder.order_for)
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👤 Маған", callback_data="order_for_self")],
+        [InlineKeyboardButton(text="👥 Басқа адамға", callback_data="order_for_other")]
+    ])
+
+    await callback.message.edit_text(
+        f"✅ Жолаушылар саны: {count}\n"
+        f"💰 Баға: {price} теңге\n\n"
+        f"👤 <b>Бұл тапсырыс кімге?</b>",
+        reply_markup=keyboard,
+        parse_mode="HTML")
     await callback.answer()
 
 
@@ -1636,8 +1841,7 @@ async def finalize_order(callback: types.CallbackQuery, state: FSMContext):
             keyboard = InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(
                     text="✅ Қабылдау",
-                    callback_data=
-                    f"driver_accept_{callback.from_user.id}_{data['from_city']}_{data['to_city']}_{data['passengers_count']}"
+                    callback_data=f"accept_client_{unique_order_id}"  # Changed from driver_accept_
                 ),
                 InlineKeyboardButton(
                     text="❌ Бас тарту",
@@ -1828,6 +2032,52 @@ async def add_another_order_no(callback: types.CallbackQuery,
         parse_mode="HTML")
     await state.clear()
     await callback.answer()
+    
+@dp.message(Command("client"))
+async def cmd_client(message: types.Message):
+    """Client menu shortcut"""
+    await show_client_menu(message, message.from_user.id)
+
+
+async def show_client_menu(message: types.Message, user_id: int):
+    """Show client profile and menu"""
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT full_name, phone, avg_rating, rating_count FROM clients WHERE user_id=? LIMIT 1",
+            (user_id,)) as cursor:
+            client = await cursor.fetchone()
+    
+    if not client:
+        await message.answer("❌ Сіз клиент ретінде тіркелмегенсіз",
+                           reply_markup=main_menu_keyboard())
+        return
+    
+    # Get active orders count
+    active_orders = await count_user_orders(user_id)
+    
+    # Get completed trips count
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM trips WHERE client_id=? AND status='completed'",
+            (user_id,)) as cursor:
+            completed = (await cursor.fetchone())[0]
+    
+    msg = f"🧍‍♂️ <b>Клиент профилі</b>\n\n"
+    msg += f"👤 {client[0]}\n"
+    msg += f"📞 {client[1]}\n"
+    msg += f"{get_rating_stars(client[2] or 0)}\n"
+    msg += f"📊 Бағалар: {client[3] or 0}\n"
+    msg += f"✅ Аяқталған сапарлар: {completed}\n"
+    msg += f"⏳ Белсенді тапсырыстар: {active_orders}\n"
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📋 Менің тапсырыстарым", callback_data="view_my_orders")],
+        [InlineKeyboardButton(text="⭐ Бағалау", callback_data="rate_start")],
+        [InlineKeyboardButton(text="➕ Жаңа тапсырыс", callback_data="add_new_order")],
+        [InlineKeyboardButton(text="🔙 Меню", callback_data="back_main")]
+    ])
+    
+    await message.answer(msg, reply_markup=keyboard, parse_mode="HTML")
 
 
 # ==================== RATINGS ====================
@@ -1955,38 +2205,23 @@ async def save_rating(callback: types.CallbackQuery, state: FSMContext):
 
 @dp.message(RatingStates.write_review)
 async def save_review(message: types.Message, state: FSMContext):
+    """Save rating with review"""
     data = await state.get_data()
     review = None if message.text == "/skip" else message.text
-
-    async with get_db(write=True) as db:
-        async with db.execute(
-                '''SELECT driver_id, client_id FROM trips WHERE id=?''',
-            (data['trip_id'], )) as cursor:
-            trip = await cursor.fetchone()
-
-        is_driver = trip[0] == message.from_user.id
-        target_id = trip[1] if is_driver else trip[0]
-        user_type = "driver" if not is_driver else "client"
-
-        await db.execute(
-            '''INSERT INTO ratings (from_user_id, to_user_id, user_type, trip_id, rating, review)
-                     VALUES (?, ?, ?, ?, ?, ?)''',
-            (message.from_user.id, target_id, user_type, data['trip_id'],
-             data['rating'], review))
-
-        table = "drivers" if user_type == "driver" else "clients"
-        await db.execute(
-            f'''UPDATE {table} 
-                      SET avg_rating = (SELECT AVG(rating) FROM ratings WHERE to_user_id=?),
-                          rating_count = (SELECT COUNT(*) FROM ratings WHERE to_user_id=?)
-                      WHERE user_id=?''', (target_id, target_id, target_id))
-
-    await save_log_action(message.from_user.id, "rating_submitted",
-                          f"Target: {target_id}, Rating: {data['rating']}")
-
+    trip_id = data.get('trip_id')
+    rating = data.get('rating')
+    
+    if not trip_id or not rating:
+        await message.answer("❌ Қате: баға деректері жоқ")
+        await state.clear()
+        return
+    
+    await save_rating_to_db(message.from_user.id, trip_id, rating, review)
+    
     await message.answer(
-        f"✅ Пікір қалдырғаныңға рақмет!\n\n"
-        f"{'⭐' * data['rating']}",
+        f"✅ Пікір қалдырғаныңызға рақмет!\n\n"
+        f"{'⭐' * rating}\n"
+        f"{f'💬 {review}' if review else ''}",
         reply_markup=main_menu_keyboard())
     await state.clear()
 
@@ -2016,33 +2251,49 @@ async def cmd_driver(message: types.Message):
 async def cmd_rate(message: types.Message, state: FSMContext):
     """Rate menu shortcut"""
     async with get_db() as db:
+        # Find trips where user was either driver or client
         async with db.execute(
-                '''SELECT t.id, t.driver_id, d.full_name, t.client_id
-                     FROM trips t
-                     JOIN drivers d ON t.driver_id = d.user_id
-                     WHERE (t.driver_id=? OR t.client_id=?)
-                     AND t.status='completed'
-                     AND t.id NOT IN (SELECT trip_id FROM ratings WHERE from_user_id=? AND trip_id IS NOT NULL)
-                     ORDER BY t.trip_completed_at DESC LIMIT 5''',
-            (message.from_user.id, message.from_user.id,
-             message.from_user.id)) as cursor:
+            '''SELECT t.id, t.driver_id, t.client_id, t.direction, t.trip_completed_at
+               FROM trips t
+               WHERE (t.driver_id=? OR t.client_id=?)
+               AND t.status='completed'
+               AND t.id NOT IN (SELECT trip_id FROM ratings WHERE from_user_id=? AND trip_id IS NOT NULL)
+               ORDER BY t.trip_completed_at DESC LIMIT 5''',
+            (message.from_user.id, message.from_user.id, message.from_user.id)) as cursor:
             trips = await cursor.fetchall()
 
     if not trips:
-        await message.answer("❌ Сапар табылмады")
+        await message.answer("❌ Бағалау үшін сапарлар жоқ")
         return
 
     keyboard_buttons = []
     for trip in trips:
         is_driver = trip[1] == message.from_user.id
-        target_name = "Клиентті" if is_driver else f"Жүргізушіні {trip[2]}"
+        
+        # Get target user info
+        target_id = trip[2] if is_driver else trip[1]
+        
+        async with get_db() as db:
+            if is_driver:
+                async with db.execute("SELECT full_name FROM clients WHERE user_id=?", (target_id,)) as cur:
+                    target = await cur.fetchone()
+                    target_name = f"Клиентті {target[0] if target else 'N/A'}"
+            else:
+                async with db.execute("SELECT full_name FROM drivers WHERE user_id=?", (target_id,)) as cur:
+                    target = await cur.fetchone()
+                    target_name = f"Жүргізушіні {target[0] if target else 'N/A'}"
+        
         keyboard_buttons.append([
-            InlineKeyboardButton(text=f"Бағалау {target_name}",
-                                 callback_data=f"rate_trip_{trip[0]}")
+            InlineKeyboardButton(text=f"⭐ {target_name}",
+                               callback_data=f"rate_trip_{trip[0]}")
         ])
+    
+    keyboard_buttons.append([
+        InlineKeyboardButton(text="🔙 Артқа", callback_data="back_main")
+    ])
 
     await message.answer(
-        "✍️ <b>Қай сапарды бағалағыңыз келеді:</b>",
+        "✍️ <b>Кімді бағалағыңыз келеді:</b>",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_buttons),
         parse_mode="HTML")
 
