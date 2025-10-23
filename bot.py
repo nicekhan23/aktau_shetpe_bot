@@ -2425,18 +2425,7 @@ async def reset_cancellation(message: types.Message):
         await message.answer("❌ Қате USER_ID")
     except Exception as e:
         await message.answer(f"❌ Қате: {e}")
-
-
-@dp.message()
-async def handle_unknown(message: types.Message):
-    logger.warning(
-        f"Unhandled message from {message.from_user.id}: {message.text}")
-    await message.answer(
-        "❓ <b>Мен бұл команданы түсінбедім.</b>\n\n"
-        "Меню батырмаларын пайдаланыңыз:",
-        parse_mode="HTML",
-        reply_markup=main_menu_keyboard())
-    
+        
 @dp.message(Command("removedriver"))
 async def remove_driver_command(message: types.Message):
     """Remove a driver (admin only)"""
@@ -2446,21 +2435,28 @@ async def remove_driver_command(message: types.Message):
 
     parts = message.text.split()
     if len(parts) != 2:
-        await message.answer("Осы команданы пайдаланыңыз: /removedriver USER_ID")
+        await message.answer(
+            "❌ Қате пайдалану!\n\n"
+            "Дұрыс формат: /removedriver USER_ID\n\n"
+            "Мысал: /removedriver 123456789")
         return
 
     try:
         driver_id = int(parts[1])
 
-        async with get_db(write=True) as db:
-            # Check if driver exists
-            async with db.execute("SELECT full_name FROM drivers WHERE user_id=?",
+        # First check if driver exists and get info
+        async with get_db() as db:
+            async with db.execute("SELECT full_name, car_model, car_number FROM drivers WHERE user_id=?",
                                  (driver_id,)) as cursor:
                 driver = await cursor.fetchone()
 
             if not driver:
                 await message.answer(f"❌ Жүргізуші табылмады: {driver_id}")
                 return
+
+            driver_name = driver[0]
+            car_model = driver[1]
+            car_number = driver[2]
 
             # Check for active trips
             async with db.execute(
@@ -2471,33 +2467,121 @@ async def remove_driver_command(message: types.Message):
 
             if active_trips > 0:
                 await message.answer(
-                    f"⚠️ Жүргізушіні жою мүмкін емес!\n"
+                    f"⚠️ <b>Жүргізушіні жою мүмкін емес!</b>\n\n"
+                    f"👤 {driver_name}\n"
+                    f"🚗 {car_model} ({car_number})\n\n"
                     f"Себебі: {active_trips} белсенді сапар бар.\n"
-                    f"Алдымен сапарларды аяқтау керек.")
+                    f"Алдымен жүргізуші сапарларды аяқтауы керек.",
+                    parse_mode="HTML")
                 return
 
+        # Now remove driver in write mode
+        async with get_db(write=True) as db:
             # Remove driver
             await db.execute("DELETE FROM drivers WHERE user_id=?", (driver_id,))
 
         await save_log_action(message.from_user.id, "driver_removed",
-                             f"Removed driver: {driver_id} ({driver[0]})")
+                             f"Removed driver: {driver_id} ({driver_name})")
 
-        await message.answer(f"✅ Жүргізуші жойылды: {driver[0]} (ID: {driver_id})")
+        await message.answer(
+            f"✅ <b>Жүргізуші жойылды!</b>\n\n"
+            f"👤 {driver_name}\n"
+            f"🚗 {car_model} ({car_number})\n"
+            f"ID: <code>{driver_id}</code>",
+            parse_mode="HTML")
 
         # Notify driver
         try:
             await bot.send_message(
                 driver_id,
-                "⚠️ <b>Сіздің жүргізуші профиліңіз админ тарапынан жойылды</b>\n\n"
-                "Егер қателік деп ойласаңыз, админге хабарласыңыз.",
+                "⚠️ <b>Сіздің жүргізуші профиліңіз жойылды</b>\n\n"
+                "Себебі: Админ тарапынан жойылды\n\n"
+                "Егер бұл қателік деп ойласаңыз немесе "
+                "қайта тіркелгіңіз келсе, админге хабарласыңыз.",
                 parse_mode="HTML")
-        except:
-            pass
+        except Exception as e:
+            logger.warning(f"Couldn't notify driver {driver_id}: {e}")
+            await message.answer(
+                f"ℹ️ Жүргізушіге хабарлама жіберу мүмкін болмады (бот бұғатталған немесе жойылған)")
 
     except ValueError:
-        await message.answer("❌ Қате USER_ID")
+        await message.answer(
+            "❌ Қате USER_ID!\n\n"
+            "USER_ID сан болуы керек.\n"
+            "Мысал: /removedriver 123456789")
     except Exception as e:
-        await message.answer(f"❌ Қате: {e}")
+        logger.error(f"Error in remove_driver_command: {e}", exc_info=True)
+        await message.answer(f"❌ Қате орын алды: {str(e)}")
+
+
+@dp.message(Command("listdrivers"))
+async def list_drivers_command(message: types.Message):
+    """List all drivers with their IDs (admin only)"""
+    if not await is_admin(message.from_user.id):
+        await message.answer("❌ Тыйым салынған")
+        return
+
+    async with get_db() as db:
+        async with db.execute(
+                '''SELECT user_id, full_name, car_model, car_number, direction, 
+                          is_active, occupied_seats, total_seats
+                   FROM drivers 
+                   ORDER BY direction, queue_position''') as cursor:
+            drivers = await cursor.fetchall()
+
+    if not drivers:
+        await message.answer("❌ Жүргізушілер жоқ")
+        return
+
+    msg = "👥 <b>Барлық жүргізушілер:</b>\n\n"
+    
+    for driver in drivers:
+        user_id = driver[0]
+        full_name = driver[1]
+        car_model = driver[2]
+        car_number = driver[3]
+        direction = driver[4]
+        is_active = driver[5]
+        occupied = driver[6] if driver[6] else 0
+        total = driver[7]
+        available = total - occupied
+        
+        status = "✅ Белсенді" if is_active else "❌ Белсенді емес"
+        
+        msg += f"👤 <b>{full_name}</b>\n"
+        msg += f"   ID: <code>{user_id}</code>\n"
+        msg += f"   🚗 {car_model} ({car_number})\n"
+        msg += f"   📍 {direction}\n"
+        msg += f"   💺 {occupied}/{total} (бос: {available})\n"
+        msg += f"   {status}\n"
+        msg += f"   Жою: /removedriver {user_id}\n\n"
+
+    # Split message if too long
+    if len(msg) > 4000:
+        parts = msg.split('\n\n')
+        current_msg = "👥 <b>Барлық жүргізушілер:</b>\n\n"
+        
+        for part in parts[1:]:  # Skip header
+            if len(current_msg) + len(part) > 4000:
+                await message.answer(current_msg, parse_mode="HTML")
+                current_msg = part + "\n\n"
+            else:
+                current_msg += part + "\n\n"
+        
+        if current_msg.strip():
+            await message.answer(current_msg, parse_mode="HTML")
+    else:
+        await message.answer(msg, parse_mode="HTML")
+
+@dp.message()
+async def handle_unknown(message: types.Message):
+    logger.warning(
+        f"Unhandled message from {message.from_user.id}: {message.text}")
+    await message.answer(
+        "❓ <b>Мен бұл команданы түсінбедім.</b>\n\n"
+        "Меню батырмаларын пайдаланыңыз:",
+        parse_mode="HTML",
+        reply_markup=main_menu_keyboard())
 
 # ==================== START ====================
 
