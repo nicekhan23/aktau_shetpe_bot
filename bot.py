@@ -91,18 +91,31 @@ class ChatState(StatesGroup):
 
 
 async def init_db():
-    """Initialize database with clean schema"""
-    db_path = os.path(DATABASE_FILE)
-    logger.info(f"📁 Database path: {db_path}")
-    
-    # Check if database already exists
-    if os.path.exists(db_path):
-        logger.info(f"✅ Database file exists, size: {os.path.getsize(db_path)} bytes")
+    """Initialize database once, reuse existing file."""
+    if not os.path.exists(DATABASE_FILE):
+        conn = sqlite3.connect(DATABASE_FILE)
+        c = conn.cursor()
+
+        # create tables
+        c.execute('''CREATE TABLE IF NOT EXISTS drivers (...)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS clients (...)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS admins (...)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS ratings (...)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS trips (...)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS actions_log (...)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS blacklist (...)''')
+
+        # indexes & PRAGMAs
+        c.execute("CREATE INDEX IF NOT EXISTS idx_clients_status ON clients(status)")
+        c.execute("PRAGMA journal_mode=WAL")
+        c.execute("PRAGMA busy_timeout=30000")
+
+        conn.commit()
+        conn.close()
+        logger.info("✅ Database initialized successfully")
     else:
-        logger.info(f"⚠️ Database file does not exist, creating new one")
-    
-    conn = sqlite3.connect(DATABASE_FILE)
-    c = conn.cursor()
+        logger.info("ℹ️ Existing database found — skipping initialization.")
+
 
     # Create drivers table
     c.execute('''CREATE TABLE IF NOT EXISTS drivers
