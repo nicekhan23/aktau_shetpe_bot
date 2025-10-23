@@ -92,6 +92,15 @@ class ChatState(StatesGroup):
 
 async def init_db():
     """Initialize database with clean schema"""
+    db_path = os.path(DATABASE_FILE)
+    logger.info(f"📁 Database path: {db_path}")
+    
+    # Check if database already exists
+    if os.path.exists(db_path):
+        logger.info(f"✅ Database file exists, size: {os.path.getsize(db_path)} bytes")
+    else:
+        logger.info(f"⚠️ Database file does not exist, creating new one")
+    
     conn = sqlite3.connect(DATABASE_FILE)
     c = conn.cursor()
 
