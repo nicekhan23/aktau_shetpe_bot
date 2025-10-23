@@ -91,33 +91,16 @@ class ChatState(StatesGroup):
 
 
 async def init_db():
-    """Initialize database once, reuse existing file."""
-    if not os.path.exists(DATABASE_FILE):
-        conn = sqlite3.connect(DATABASE_FILE)
-        c = conn.cursor()
-
-        # create tables
-        c.execute('''CREATE TABLE IF NOT EXISTS drivers (...)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS clients (...)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS admins (...)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS ratings (...)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS trips (...)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS actions_log (...)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS blacklist (...)''')
-
-        # indexes & PRAGMAs
-        c.execute("CREATE INDEX IF NOT EXISTS idx_clients_status ON clients(status)")
-        c.execute("PRAGMA journal_mode=WAL")
-        c.execute("PRAGMA busy_timeout=30000")
-
-        conn.commit()
-        conn.close()
-        logger.info("✅ Database initialized successfully")
-    else:
+    """Initialize database if not exists, otherwise reuse existing."""
+    if os.path.exists(DATABASE_FILE):
         logger.info("ℹ️ Existing database found — skipping initialization.")
+        return
 
+    # Create a new database only if missing
+    conn = sqlite3.connect(DATABASE_FILE)
+    c = conn.cursor()
 
-    # Create drivers table
+    # === Tables ===
     c.execute('''CREATE TABLE IF NOT EXISTS drivers
                  (user_id INTEGER PRIMARY KEY,
                   full_name TEXT NOT NULL,
@@ -138,7 +121,6 @@ async def init_db():
                   payment_methods TEXT DEFAULT '',
                   kaspi_number TEXT DEFAULT '')''')
 
-    # Create clients table
     c.execute('''CREATE TABLE IF NOT EXISTS clients
                  (user_id INTEGER PRIMARY KEY,
                   full_name TEXT NOT NULL,
@@ -160,12 +142,10 @@ async def init_db():
                   from_city TEXT DEFAULT '',
                   to_city TEXT DEFAULT '')''')
 
-    # Create admins table
     c.execute('''CREATE TABLE IF NOT EXISTS admins
                  (user_id INTEGER PRIMARY KEY,
                   added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
 
-    # Create ratings table
     c.execute('''CREATE TABLE IF NOT EXISTS ratings
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   from_user_id INTEGER,
@@ -176,7 +156,6 @@ async def init_db():
                   review TEXT,
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
 
-    # Create trips table
     c.execute('''CREATE TABLE IF NOT EXISTS trips
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   driver_id INTEGER,
@@ -191,7 +170,6 @@ async def init_db():
                   cancelled_at TIMESTAMP,
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
 
-    # Create actions_log table
     c.execute('''CREATE TABLE IF NOT EXISTS actions_log
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   user_id INTEGER,
@@ -199,38 +177,22 @@ async def init_db():
                   details TEXT,
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
 
-    # Create blacklist table
     c.execute('''CREATE TABLE IF NOT EXISTS blacklist
                  (user_id INTEGER PRIMARY KEY,
                   reason TEXT,
                   cancellation_count INTEGER DEFAULT 0,
                   banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
 
-    # Create indexes for better performance
-    c.execute(
-        "CREATE INDEX IF NOT EXISTS idx_clients_status ON clients(status)")
-    c.execute(
-        "CREATE INDEX IF NOT EXISTS idx_clients_direction ON clients(direction)"
-    )
-    c.execute(
-        "CREATE INDEX IF NOT EXISTS idx_clients_from_city ON clients(from_city)"
-    )
-    c.execute(
-        "CREATE INDEX IF NOT EXISTS idx_drivers_direction ON drivers(direction)"
-    )
-    c.execute(
-        "CREATE INDEX IF NOT EXISTS idx_trips_driver ON trips(driver_id)")
-    c.execute(
-        "CREATE INDEX IF NOT EXISTS idx_trips_client ON trips(client_id)")
-
-    # Enable WAL mode for better concurrent access
+    # === Indexes and pragmas ===
+    c.execute("CREATE INDEX IF NOT EXISTS idx_clients_status ON clients(status)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_clients_direction ON clients(direction)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_drivers_direction ON drivers(direction)")
     c.execute("PRAGMA journal_mode=WAL")
     c.execute("PRAGMA busy_timeout=30000")
 
     conn.commit()
     conn.close()
-
-    logger.info("✅ Database initialized successfully")
+    logger.info("✅ Database initialized successfully (first-time creation).")
 
 
 @asynccontextmanager
