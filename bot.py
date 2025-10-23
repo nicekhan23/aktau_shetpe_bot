@@ -349,40 +349,14 @@ def main_menu_keyboard():
 
 
 def from_city_keyboard():
-    """Choosing the departure city (only Aktau, Zhanaozen, or Shetpe)"""
+    """Choosing the direction for clients"""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Ақтау", callback_data="from_aktau")],
-        [InlineKeyboardButton(text="Жаңаөзен", callback_data="from_janaozen")],
-        [InlineKeyboardButton(text="Шетпе", callback_data="from_shetpe")],
+        [InlineKeyboardButton(text="Ақтау → Жаңаөзен", callback_data="dir_aktau_janaozen")],
+        [InlineKeyboardButton(text="Жаңаөзен → Ақтау", callback_data="dir_janaozen_aktau")],
+        [InlineKeyboardButton(text="Ақтау → Шетпе", callback_data="dir_aktau_shetpe")],
+        [InlineKeyboardButton(text="Шетпе → Ақтау", callback_data="dir_shetpe_aktau")],
         [InlineKeyboardButton(text="🔙 Артқа", callback_data="back_main")]
     ])
-
-
-def to_city_keyboard(from_city: str):
-    """Choosing the destination city based on departure"""
-    buttons = []
-
-    if from_city == "Ақтау":
-        # From Aktau → can go to Shetpe or Zhanaozen
-        buttons.append(
-            [InlineKeyboardButton(text="Шетпе", callback_data="to_shetpe")])
-        buttons.append([
-            InlineKeyboardButton(text="Жаңаөзен", callback_data="to_janaozen")
-        ])
-    elif from_city == "Жаңаөзен":
-        # From Zhanaozen → can go only to Aktau
-        buttons.append(
-            [InlineKeyboardButton(text="Ақтау", callback_data="to_aktau")])
-    elif from_city == "Шетпе":
-        # From Shetpe → can go only to Aktau
-        buttons.append(
-            [InlineKeyboardButton(text="Ақтау", callback_data="to_aktau")])
-
-    # Add back button
-    buttons.append(
-        [InlineKeyboardButton(text="🔙 Артқа", callback_data="back_from_city")])
-
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def get_rating_stars(rating: float) -> str:
@@ -479,36 +453,37 @@ async def driver_car_model(message: types.Message, state: FSMContext):
 async def driver_seats(message: types.Message, state: FSMContext):
     try:
         seats = int(message.text)
-        if seats < 1 or seats > 8:
-            await message.answer("Қате! Орын саны 1-ден 8-ге дейін болуы керек"
-                                 )
+        if seats < 1 or seats > 7:  # Changed from 8 to 7
+            await message.answer("Қате! Орын саны 1-ден 7-ге дейін болуы керек")
             return
         await state.update_data(seats=seats)
-        await message.answer("📍 Қай қаладан шығасыз?",
+        await message.answer("📍 Қай бағытты таңдайсыз?",  # Changed text
                              reply_markup=current_city_keyboard())
         await state.set_state(DriverReg.current_city)
     except ValueError:
         await message.answer("Сан енгізіңіз!")
 
 
-@dp.callback_query(DriverReg.current_city, F.data.startswith("city_"))
-async def driver_current_city(callback: types.CallbackQuery,
-                              state: FSMContext):
-    city_map = {
-        "city_aktau": "Ақтау",
-        "city_janaozen": "Жаңаөзен",
-        "city_shetpe": "Шетпе"
+@dp.callback_query(DriverReg.current_city, F.data.startswith("dir_"))
+async def driver_current_city(callback: types.CallbackQuery, state: FSMContext):
+    direction_map = {
+        "dir_aktau_janaozen": "Ақтау → Жаңаөзен",
+        "dir_janaozen_aktau": "Жаңаөзен → Ақтау",
+        "dir_aktau_shetpe": "Ақтау → Шетпе",
+        "dir_shetpe_aktau": "Шетпе → Ақтау"
     }
-
-    current_city = city_map.get(callback.data, "Ақтау")
+    
+    direction = direction_map.get(callback.data, "Ақтау → Жаңаөзен")
     data = await state.get_data()
+    
+    # Extract from_city from direction
+    from_city = direction.split(" → ")[0]
 
     # Use provided phone number
     phone = data.get('phone_number', f"tg_{callback.from_user.id}")
 
     async with get_db(write=True) as db:
-        # Driver registers with current city (without destination)
-        # direction is current_city now (where he can take the orders)
+        # Driver registers with chosen direction
         await db.execute(
             '''INSERT INTO drivers 
                      (user_id, full_name, phone, car_number, car_model, total_seats, 
@@ -516,18 +491,18 @@ async def driver_current_city(callback: types.CallbackQuery,
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             (callback.from_user.id, data['full_name'], phone,
              data['car_number'], data['car_model'], data['seats'],
-             current_city, 0, 1, 1, 0))
+             direction, 0, 1, 1, 0))
 
     await save_log_action(callback.from_user.id, "driver_registered",
-                          f"Current city: {current_city}")
+                          f"Direction: {direction}")
 
     await callback.message.edit_text(
         f"✅ <b>Сіз тіркелдіңіз!</b>\n\n"
         f"👤 {data['full_name']}\n"
         f"🚗 {data['car_model']} ({data['car_number']})\n"
         f"💺 Орын саны: {data['seats']}\n"
-        f"📍 Қазіргі қала: {current_city}\n\n"
-        f"Сіз {current_city} қаласынан шығатын барлық тапсырыстарды көре аласыз\n\n"
+        f"📍 Бағыт: {direction}\n\n"
+        f"Сіз {direction} бағыты бойынша тапсырыстарды көре аласыз\n\n"
         f"💡 Кеңес: Жүргізуші мәзіріне тез өту үшін /driver командасын пайдаланыңыз",
         parse_mode="HTML")
 
@@ -540,11 +515,12 @@ async def driver_current_city(callback: types.CallbackQuery,
 
 
 def current_city_keyboard():
-    """Choosing the current city for the driver"""
+    """Choosing the direction for the driver"""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Ақтау", callback_data="city_aktau")],
-        [InlineKeyboardButton(text="Жаңаөзен", callback_data="city_janaozen")],
-        [InlineKeyboardButton(text="Шетпе", callback_data="city_shetpe")],
+        [InlineKeyboardButton(text="Ақтау → Жаңаөзен", callback_data="dir_aktau_janaozen")],
+        [InlineKeyboardButton(text="Жаңаөзен → Ақтау", callback_data="dir_janaozen_aktau")],
+        [InlineKeyboardButton(text="Ақтау → Шетпе", callback_data="dir_aktau_shetpe")],
+        [InlineKeyboardButton(text="Шетпе → Ақтау", callback_data="dir_shetpe_aktau")],
         [InlineKeyboardButton(text="🔙 Артқа", callback_data="back_main")]
     ])
 
@@ -568,8 +544,7 @@ async def show_driver_menu(message: types.Message, user_id: int):
         'car_number') if 'car_number' in columns else 2
     car_model_idx = columns.index('car_model') if 'car_model' in columns else 3
     direction_idx = columns.index(
-        'direction'
-    ) if 'direction' in columns else 6  # Теперь это current_city
+        'direction') if 'direction' in columns else 6
 
     if 'occupied_seats' in columns and 'total_seats' in columns:
         occupied, total, available = await get_driver_available_seats(user_id)
@@ -600,13 +575,10 @@ async def show_driver_menu(message: types.Message, user_id: int):
                                  callback_data="driver_complete_trip")
         ],
         [
-            InlineKeyboardButton(text="🔄 Қаланы өзгерту",
-                                 callback_data="driver_change_city")
+            InlineKeyboardButton(text="🔄 Бағытты өзгерту",
+                                 callback_data="driver_change_direction")
         ],
-        [
-            InlineKeyboardButton(text="❌ Кезектен шығу",
-                                 callback_data="driver_exit")
-        ], [InlineKeyboardButton(text="🔙 Меню", callback_data="back_main")]
+        [InlineKeyboardButton(text="🔙 Меню", callback_data="back_main")]
     ])
 
     await message.answer(
@@ -614,9 +586,9 @@ async def show_driver_menu(message: types.Message, user_id: int):
         f"👤 {driver[full_name_idx]}\n"
         f"🚗 {driver[car_model_idx]} ({driver[car_number_idx]})\n"
         f"{seats_text}"
-        f"📍 Қазіргі қала: {driver[direction_idx]}\n"
+        f"📍 Бағыт: {driver[direction_idx]}\n"
         f"{rating_text}\n\n"
-        "Сіз өз қалаңыздан шығатын тапсырыстарды көре аласыз",
+        "Сіз өз бағытыңыз бойынша тапсырыстарды көре аласыз",
         reply_markup=keyboard,
         parse_mode="HTML")
 
@@ -628,9 +600,9 @@ async def driver_status(callback: types.CallbackQuery):
                               (callback.from_user.id, )) as cursor:
             driver = await cursor.fetchone()
 
-        # Counting waiting orders from driver's current city
+        # Counting waiting orders on same direction
         async with db.execute(
-                "SELECT COUNT(*) FROM clients WHERE from_city=? AND status='waiting'",
+                "SELECT COUNT(*) FROM clients WHERE direction=? AND status='waiting'",
             (driver[6], )) as cursor:
             waiting = (await cursor.fetchone())[0]
 
@@ -640,17 +612,16 @@ async def driver_status(callback: types.CallbackQuery):
     await callback.message.edit_text(
         f"📊 <b>Статус</b>\n\n"
         f"🚗 {driver[4]} ({driver[3]})\n"
-        f"📍 Қазіргі қала: {driver[6]}\n"
+        f"📍 Бағыт: {driver[6]}\n"
         f"💺 Бос емес: {occupied}/{total}\n"
         f"💺 Бос орындар: {available}\n"
-        f"⏳ Сіздің қалаңыздан шығатын тапсырыстар: {waiting}\n"
+        f"⏳ Сіздің бағытыңыз бойынша тапсырыстар: {waiting}\n"
         f"{get_rating_stars(driver[13] if len(driver) > 13 else 0)}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="🔙 Артқа", callback_data="driver_menu")
         ]]),
         parse_mode="HTML")
     await callback.answer()
-
 
 @dp.callback_query(F.data == "driver_passengers")
 async def driver_passengers(callback: types.CallbackQuery):
@@ -680,13 +651,13 @@ async def driver_passengers(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "driver_available_orders")
 async def driver_available_orders(callback: types.CallbackQuery):
-    """Show available orders for the driver based on their current city"""
+    """Show available orders for the driver based on their direction"""
     # Answer immediately to prevent timeout
     await callback.answer("⏳ Жүктелуде...")
     
     try:
         async with get_db() as db:
-            # Get driver's current city
+            # Get driver's direction
             async with db.execute("SELECT direction FROM drivers WHERE user_id=?",
                                   (callback.from_user.id, )) as cursor:
                 result = await cursor.fetchone()
@@ -695,27 +666,27 @@ async def driver_available_orders(callback: types.CallbackQuery):
                 await callback.message.edit_text("❌ Жүргізуші табылмады")
                 return
                 
-            driver_city = result[0]
-            logger.info(f"Driver {callback.from_user.id} city: {driver_city}")
+            driver_direction = result[0]
+            logger.info(f"Driver {callback.from_user.id} direction: {driver_direction}")
 
         # Get available seats (outside the db context)
         occupied, total, available = await get_driver_available_seats(callback.from_user.id)
         logger.info(f"Driver seats: {occupied}/{total}, available: {available}")
 
-        # Get waiting clients
+        # Get waiting clients with same direction
         async with get_db() as db:
             async with db.execute(
                 '''SELECT user_id, full_name, passengers_count, queue_position, 
                           direction, from_city, to_city
                    FROM clients
-                   WHERE from_city=? AND status='waiting'
-                   ORDER BY queue_position''', (driver_city, )) as cursor:
+                   WHERE direction=? AND status='waiting'
+                   ORDER BY queue_position''', (driver_direction,)) as cursor:
                 clients = await cursor.fetchall()
 
         logger.info(f"Found {len(clients)} waiting clients")
 
         if not clients:
-            msg = f"❌ Сіздің қалаңыздан шығатын тапсырыстар жоқ: {driver_city}\n\n💺 Бос орындар: {available}"
+            msg = f"❌ Сіздің бағытыңыз бойынша тапсырыстар жоқ: {driver_direction}\n\n💺 Бос орындар: {available}"
             await callback.message.edit_text(
                 msg,
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
@@ -724,7 +695,7 @@ async def driver_available_orders(callback: types.CallbackQuery):
                 parse_mode="HTML")
             return
 
-        msg = f"🔔 <b>{driver_city} қаласынан шығатын тапсырыстар:</b>\n"
+        msg = f"🔔 <b>{driver_direction} бағыты бойынша тапсырыстар:</b>\n"
         msg += f"💺 Бос орындар: {available}\n\n"
 
         keyboard_buttons = []
@@ -734,8 +705,7 @@ async def driver_available_orders(callback: types.CallbackQuery):
             warning = "" if can_fit else " (орын жетпейді!)"
 
             msg += f"{fit_emoji} №{client[3]} - {client[1]} ({client[2]} адам.){warning}\n"
-            msg += f"   🎯 {client[4]}\n"
-            msg += f"   📍 {client[5]} → {client[6]}\n\n"
+            msg += f"   🎯 {client[4]}\n\n"
 
             button_text = f"✅ №{client[3]} алу ({client[2]} адам.)"
             if not can_fit:
@@ -873,9 +843,9 @@ async def accept_client(callback: types.CallbackQuery):
         await callback.answer("❌ Қате. Тағы бір рет көріңіз.", show_alert=True)
 
 
-@dp.callback_query(F.data == "driver_change_city")
-async def driver_change_city(callback: types.CallbackQuery):
-    """Driver changes current city"""
+@dp.callback_query(F.data == "driver_change_direction")
+async def driver_change_direction(callback: types.CallbackQuery):
+    """Driver changes direction"""
     async with get_db() as db:
         # Check active trips
         async with db.execute(
@@ -886,62 +856,52 @@ async def driver_change_city(callback: types.CallbackQuery):
 
         if active_trips > 0:
             await callback.answer(
-                "❌ Қаланы өзгерту мүмкін емес - белсенді сапарлар бар!",
+                "❌ Бағытты өзгерту мүмкін емес - белсенді сапарлар бар!",
                 show_alert=True)
             return
 
     await callback.message.edit_text(
-        "📍 <b>Қаланы өзгерту</b>\n\n"
-        "Сіз орналасқан қаланы таңдаңыз:",
+        "📍 <b>Бағытты өзгерту</b>\n\n"
+        "Жаңа бағытты таңдаңыз:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="Ақтау",
-                                     callback_data="change_to_aktau")
-            ],
-            [
-                InlineKeyboardButton(text="Жаңаөзен",
-                                     callback_data="change_to_janaozen")
-            ],
-            [
-                InlineKeyboardButton(text="Шетпе",
-                                     callback_data="change_to_shetpe")
-            ],
-            [
-                InlineKeyboardButton(text="🔙 Артқа",
-                                     callback_data="driver_menu")
-            ]
+            [InlineKeyboardButton(text="Ақтау → Жаңаөзен", callback_data="change_dir_aktau_janaozen")],
+            [InlineKeyboardButton(text="Жаңаөзен → Ақтау", callback_data="change_dir_janaozen_aktau")],
+            [InlineKeyboardButton(text="Ақтау → Шетпе", callback_data="change_dir_aktau_shetpe")],
+            [InlineKeyboardButton(text="Шетпе → Ақтау", callback_data="change_dir_shetpe_aktau")],
+            [InlineKeyboardButton(text="🔙 Артқа", callback_data="driver_menu")]
         ]),
         parse_mode="HTML")
     await callback.answer()
 
 
-@dp.callback_query(F.data.startswith("change_to_"))
-async def confirm_change_city(callback: types.CallbackQuery):
-    """Verify and change driver's current city"""
-    city_map = {
-        "change_to_aktau": "Ақтау",
-        "change_to_janaozen": "Жаңаөзен",
-        "change_to_shetpe": "Шетпе"
+@dp.callback_query(F.data.startswith("change_dir_"))
+async def confirm_change_direction(callback: types.CallbackQuery):
+    """Verify and change driver's direction"""
+    direction_map = {
+        "change_dir_aktau_janaozen": "Ақтау → Жаңаөзен",
+        "change_dir_janaozen_aktau": "Жаңаөзен → Ақтау",
+        "change_dir_aktau_shetpe": "Ақтау → Шетпе",
+        "change_dir_shetpe_aktau": "Шетпе → Ақтау"
     }
 
-    new_city = city_map[callback.data]
+    new_direction = direction_map[callback.data]
 
     async with get_db(write=True) as db:
         # Get old direction
         async with db.execute("SELECT direction FROM drivers WHERE user_id=?",
                               (callback.from_user.id, )) as cursor:
-            old_city = (await cursor.fetchone())[0]
+            old_direction = (await cursor.fetchone())[0]
 
-        # Update driver city
+        # Update driver direction
         await db.execute(
             "UPDATE drivers SET direction=?, queue_position=0 WHERE user_id=?",
-            (new_city, callback.from_user.id))
+            (new_direction, callback.from_user.id))
 
-        # Reorder queues for both old and new cities
-        for city in [old_city, new_city]:
+        # Reorder queues for both old and new directions
+        for direction in [old_direction, new_direction]:
             async with db.execute(
                     "SELECT user_id FROM drivers WHERE direction=? ORDER BY queue_position",
-                (city, )) as cursor:
+                (direction, )) as cursor:
                 drivers = await cursor.fetchall()
 
             for pos, (driver_id, ) in enumerate(drivers, 1):
@@ -949,13 +909,13 @@ async def confirm_change_city(callback: types.CallbackQuery):
                     "UPDATE drivers SET queue_position=? WHERE user_id=?",
                     (pos, driver_id))
 
-    await save_log_action(callback.from_user.id, "city_changed",
-                          f"New city: {new_city}")
+    await save_log_action(callback.from_user.id, "direction_changed",
+                          f"New direction: {new_direction}")
 
     await callback.message.edit_text(
-        f"✅ <b>Қала өзгертілді!</b>\n\n"
-        f"📍 Жаңа қала: {new_city}\n\n"
-        f"Енді сіз {new_city} қаласынан тапсырыстарды көре аласыз",
+        f"✅ <b>Бағыт өзгертілді!</b>\n\n"
+        f"📍 Жаңа бағыт: {new_direction}\n\n"
+        f"Енді сіз {new_direction} бағыты бойынша тапсырыстарды көре аласыз",
         parse_mode="HTML")
 
     await asyncio.sleep(2)
@@ -1157,31 +1117,6 @@ async def save_rating_to_db(user_id: int, trip_id: int, rating: int, review: str
                 WHERE user_id=?''', (target_id, target_id, target_id))
     
     await save_log_action(user_id, "rating_submitted", f"Target: {target_id}, Rating: {rating}")
-
-@dp.callback_query(F.data == "driver_exit")
-async def driver_exit(callback: types.CallbackQuery):
-    async with get_db(write=True) as db:
-        async with db.execute(
-                '''SELECT COUNT(*) FROM clients 
-                     WHERE assigned_driver_id=? AND status IN ('accepted', 'driver_arrived')''',
-            (callback.from_user.id, )) as cursor:
-            active_trips = (await cursor.fetchone())[0]
-
-        if active_trips > 0:
-            await callback.answer(
-                "❌ Шығу мүмкін емес - белсенді сапарлар бар!", show_alert=True)
-            return
-
-        await db.execute("DELETE FROM drivers WHERE user_id=?",
-                         (callback.from_user.id, ))
-
-    await save_log_action(callback.from_user.id, "driver_exit", "")
-
-    await callback.message.delete()
-    await callback.message.answer("❌ Сіз жүйеден шықтыңыз",
-                                  reply_markup=main_menu_keyboard())
-    await callback.answer()
-
 
 @dp.callback_query(F.data == "driver_menu")
 async def driver_menu_back(callback: types.CallbackQuery):
@@ -1515,37 +1450,19 @@ async def cancel_specific_order(callback: types.CallbackQuery):
             parse_mode="HTML")
 
 
-@dp.callback_query(ClientOrder.from_city, F.data.startswith("from_"))
+@dp.callback_query(ClientOrder.from_city, F.data.startswith("dir_"))
 async def client_from_city(callback: types.CallbackQuery, state: FSMContext):
-    city_map = {
-        "from_aktau": "Ақтау",
-        "from_janaozen": "Жаңаөзен",
-        "from_shetpe": "Шетпе"
+    direction_map = {
+        "dir_aktau_janaozen": "Ақтау → Жаңаөзен",
+        "dir_janaozen_aktau": "Жаңаөзен → Ақтау",
+        "dir_aktau_shetpe": "Ақтау → Шетпе",
+        "dir_shetpe_aktau": "Шетпе → Ақтау"
     }
-    from_city = city_map[callback.data]
-    await state.update_data(from_city=from_city)
-
-    # Add keyboard for destination city
-    await callback.message.edit_text(
-        f"✅ Қайдан: {from_city}\n\nҚайда барасыз?",
-        reply_markup=to_city_keyboard(from_city))
-    await state.set_state(ClientOrder.to_city)
-    await callback.answer()
-
-
-@dp.callback_query(ClientOrder.to_city, F.data.startswith("to_"))
-async def client_to_city(callback: types.CallbackQuery, state: FSMContext):
-    city_map = {
-        "to_aktau": "Ақтау",
-        "to_janaozen": "Жаңаөзен",
-        "to_shetpe": "Шетпе"
-    }
-
-    to_city = city_map[callback.data]
-    data = await state.get_data()
-
-    direction = f"{data['from_city']} → {to_city}"
-    await state.update_data(to_city=to_city, direction=direction)
+    
+    direction = direction_map[callback.data]
+    from_city, to_city = direction.split(" → ")
+    
+    await state.update_data(from_city=from_city, to_city=to_city, direction=direction)
 
     # Show available drivers and seats
     async with get_db() as db:
@@ -1553,15 +1470,15 @@ async def client_to_city(callback: types.CallbackQuery, state: FSMContext):
             '''SELECT COUNT(*), SUM(total_seats - COALESCE(occupied_seats, 0))
                FROM drivers 
                WHERE direction=? AND is_active=1''',
-            (data['from_city'],)) as cursor:
+            (direction,)) as cursor:
             result = await cursor.fetchone()
 
     drivers_count = result[0] or 0
     available_seats = result[1] or 0
 
-    # Create seat selection buttons (1-8)
+    # Create seat selection buttons (1-7)
     seat_buttons = []
-    for i in range(1, 9):
+    for i in range(1, 8):  # Changed from 9 to 8
         seat_buttons.append([
             InlineKeyboardButton(text=f"👥 {i} орын", callback_data=f"seats_{i}")
         ])
@@ -1579,7 +1496,6 @@ async def client_to_city(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(ClientOrder.passengers_count)
     await callback.answer()
 
-
 # Add new callback handler for seat buttons
 @dp.callback_query(ClientOrder.passengers_count, F.data.startswith("seats_"))
 async def client_select_seats(callback: types.CallbackQuery, state: FSMContext):
@@ -1587,6 +1503,7 @@ async def client_select_seats(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     from_city = data.get("from_city")
     to_city = data.get("to_city")
+    direction = data.get("direction")
 
     # Calculate price
     if {"Ақтау", "Шетпе"} == {from_city, to_city}:
@@ -1597,7 +1514,7 @@ async def client_select_seats(callback: types.CallbackQuery, state: FSMContext):
         price = 0
 
     # ✅ CRITICAL: Save passengers_count to state
-    await state.update_data(passengers_count=count)
+    await state.update_data(passengers_count=count, order_for="Маған")
     
     # Check suitable drivers
     async with get_db() as db:
@@ -1605,59 +1522,29 @@ async def client_select_seats(callback: types.CallbackQuery, state: FSMContext):
             '''SELECT COUNT(*) FROM drivers 
                WHERE direction=? AND is_active=1 
                AND (total_seats - COALESCE(occupied_seats, 0)) >= ?''',
-            (from_city, count)) as cursor:
+            (direction, count)) as cursor:
             suitable_cars = (await cursor.fetchone())[0]
-    
-    await state.set_state(ClientOrder.order_for)
-
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👤 Маған", callback_data="order_for_self")],
-        [InlineKeyboardButton(text="👥 Басқа адамға", callback_data="order_for_other")]
-    ])
 
     if suitable_cars == 0:
-        await callback.message.edit_text(
-            f"⚠️ Жолаушылар саны: {count}\n"
-            f"💰 Баға: {price} теңге\n"
-            f"⚠️ Қазір {count} бос орны бар көліктер жоқ\n\n"
-            f"Бірақ сіздің тапсырысыңыз сақталады!\n"
-            f"Жүргізушілер оны бос орындар пайда болғанда көретін болады.\n\n"
-            f"👤 <b>Бұл тапсырыс кімге?</b>",
-            reply_markup=keyboard,
-            parse_mode="HTML")
+        msg = (f"⚠️ Жолаушылар саны: {count}\n"
+               f"💰 Баға: {price} теңге\n"
+               f"⚠️ Қазір {count} бос орны бар көліктер жоқ\n\n"
+               f"Бірақ сіздің тапсырысыңыз сақталады!\n"
+               f"Жүргізушілер оны бос орындар пайда болғанда көретін болады.\n\n"
+               f"Тапсырысты растайсыз ба?")
     else:
-        await callback.message.edit_text(
-            f"✅ Жолаушылар саны: {count}\n"
-            f"💰 Баға: {price} теңге\n"
-            f"🚗 Бос жүргізушілер: {suitable_cars}\n\n"
-            f"👤 <b>Бұл тапсырыс кімге?</b>",
-            reply_markup=keyboard,
-            parse_mode="HTML")
+        msg = (f"✅ Жолаушылар саны: {count}\n"
+               f"💰 Баға: {price} теңге\n"
+               f"🚗 Бос жүргізушілер: {suitable_cars}\n\n"
+               f"Тапсырысты растайсыз ба?")
     
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Растау", callback_data="confirm_order")],
+        [InlineKeyboardButton(text="🔙 Артқа", callback_data="back_from_city")]
+    ])
+    
+    await callback.message.edit_text(msg, reply_markup=keyboard)
     await callback.answer()
-    
-@dp.callback_query(F.data == "order_for_self")
-async def order_for_self(callback: types.CallbackQuery, state: FSMContext):
-    """Order for self"""
-    data = await state.get_data()
-    
-    # ✅ Debug logging
-    logger.info(f"order_for_self - State data: {data}")
-    
-    # ✅ Safety check
-    if 'passengers_count' not in data:
-        logger.error(f"Missing passengers_count in state: {data}")
-        await callback.answer("❌ Қате: жолаушылар саны таңдалмаған", show_alert=True)
-        await callback.message.edit_text(
-            "Қате орын алды. Қайтадан бастаңыз:",
-            reply_markup=from_city_keyboard()
-        )
-        await state.clear()
-        return
-    
-    await state.update_data(order_for="Маған")
-    await callback.answer()
-    await finalize_order(callback, state)
 
 @dp.callback_query(F.data == "back_from_city")
 async def back_from_city(callback: types.CallbackQuery, state: FSMContext):
@@ -1665,43 +1552,6 @@ async def back_from_city(callback: types.CallbackQuery, state: FSMContext):
                                      reply_markup=from_city_keyboard())
     await state.set_state(ClientOrder.from_city)
     await callback.answer()
-
-@dp.callback_query(F.data == "order_for_other")
-async def order_for_other(callback: types.CallbackQuery, state: FSMContext):
-    """Order for another person"""
-    await callback.message.edit_text(
-        "👥 <b>Жолаушы деректері</b>\n\n"
-        "Жолаушының атын енгізіңіз:",
-        parse_mode="HTML")
-    await state.set_state(ClientOrder.passenger_name)
-    await callback.answer()
-
-
-@dp.message(ClientOrder.passenger_name, F.text)
-async def save_passenger_name(message: types.Message, state: FSMContext):
-    """Save passenger name and ask for phone"""
-    await state.update_data(passenger_name=message.text)
-    await message.answer("📱 Жолаушының телефон нөмірін енгізіңіз:\n"
-                         "(мысалы: +7 777 123 45 67)")
-    await state.set_state(ClientOrder.passenger_phone)
-
-
-@dp.message(ClientOrder.passenger_phone, F.text)
-async def save_passenger_phone(message: types.Message, state: FSMContext):
-    """Save passenger phone and finalize order"""
-    data = await state.get_data()
-    passenger_info = f"{data['passenger_name']} ({message.text.strip()})"
-    await state.update_data(order_for=passenger_info,
-                            passenger_phone=message.text.strip())
-    await finalize_order_from_message(message, state)
-
-
-@dp.message(ClientOrder.order_for, F.text)
-async def save_order_for_name(message: types.Message, state: FSMContext):
-    """Save the name of the person for whom the order is made"""
-    await state.update_data(order_for=message.text)
-    await finalize_order_from_message(message, state)
-
 
 async def finalize_order(callback: types.CallbackQuery, state: FSMContext):
     """Finalize the order and offer to add another"""
@@ -1810,7 +1660,12 @@ async def finalize_order(callback: types.CallbackQuery, state: FSMContext):
         reply_markup=keyboard,
         parse_mode="HTML")
     await state.set_state(ClientOrder.add_another)
-
+    
+@dp.callback_query(F.data == "confirm_order")
+async def confirm_order(callback: types.CallbackQuery, state: FSMContext):
+    """Confirm and finalize order"""
+    await callback.answer()
+    await finalize_order(callback, state)
 
 async def finalize_order_from_message(message: types.Message,
                                       state: FSMContext):
@@ -2592,6 +2447,68 @@ async def handle_unknown(message: types.Message):
         "Меню батырмаларын пайдаланыңыз:",
         parse_mode="HTML",
         reply_markup=main_menu_keyboard())
+    
+@dp.message(Command("removedriver"))
+async def remove_driver_command(message: types.Message):
+    """Remove a driver (admin only)"""
+    if not await is_admin(message.from_user.id):
+        await message.answer("❌ Тыйым салынған")
+        return
+
+    parts = message.text.split()
+    if len(parts) != 2:
+        await message.answer("Осы команданы пайдаланыңыз: /removedriver USER_ID")
+        return
+
+    try:
+        driver_id = int(parts[1])
+
+        async with get_db(write=True) as db:
+            # Check if driver exists
+            async with db.execute("SELECT full_name FROM drivers WHERE user_id=?",
+                                 (driver_id,)) as cursor:
+                driver = await cursor.fetchone()
+
+            if not driver:
+                await message.answer(f"❌ Жүргізуші табылмады: {driver_id}")
+                return
+
+            # Check for active trips
+            async with db.execute(
+                    '''SELECT COUNT(*) FROM clients 
+                       WHERE assigned_driver_id=? AND status IN ('accepted', 'driver_arrived')''',
+                (driver_id,)) as cursor:
+                active_trips = (await cursor.fetchone())[0]
+
+            if active_trips > 0:
+                await message.answer(
+                    f"⚠️ Жүргізушіні жою мүмкін емес!\n"
+                    f"Себебі: {active_trips} белсенді сапар бар.\n"
+                    f"Алдымен сапарларды аяқтау керек.")
+                return
+
+            # Remove driver
+            await db.execute("DELETE FROM drivers WHERE user_id=?", (driver_id,))
+
+        await save_log_action(message.from_user.id, "driver_removed",
+                             f"Removed driver: {driver_id} ({driver[0]})")
+
+        await message.answer(f"✅ Жүргізуші жойылды: {driver[0]} (ID: {driver_id})")
+
+        # Notify driver
+        try:
+            await bot.send_message(
+                driver_id,
+                "⚠️ <b>Сіздің жүргізуші профиліңіз админ тарапынан жойылды</b>\n\n"
+                "Егер қателік деп ойласаңыз, админге хабарласыңыз.",
+                parse_mode="HTML")
+        except:
+            pass
+
+    except ValueError:
+        await message.answer("❌ Қате USER_ID")
+    except Exception as e:
+        await message.answer(f"❌ Қате: {e}")
 
 # ==================== START ====================
 
