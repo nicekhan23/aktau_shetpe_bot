@@ -1233,15 +1233,21 @@ async def client_start(message: types.Message, state: FSMContext):
 
 async def start_new_order(message: types.Message, state: FSMContext):
     """Helper function to start a new order"""
-    from_city_keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="Ақтау", callback_data="from_aktau")
-    ], [InlineKeyboardButton(text="Жаңаөзен", callback_data="from_janaozen")
-        ], [InlineKeyboardButton(text="Шетпе", callback_data="from_shetpe")]])
+    # Use the same direction keyboard as drivers
+    direction_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Ақтау → Жаңаөзен", callback_data="dir_aktau_janaozen")],
+        [InlineKeyboardButton(text="Жаңаөзен → Ақтау", callback_data="dir_janaozen_aktau")],
+        [InlineKeyboardButton(text="Ақтау → Шетпе", callback_data="dir_aktau_shetpe")],
+        [InlineKeyboardButton(text="Шетпе → Ақтау", callback_data="dir_shetpe_aktau")],
+        [InlineKeyboardButton(text="🔙 Артқа", callback_data="back_main")]
+    ])
 
-    await message.answer("🧍‍♂️ <b>Такси шақыру</b>\n\nҚай қаладан шығасыз?",
-                         reply_markup=from_city_keyboard,
-                         parse_mode="HTML")
+    await message.answer(
+        "🧍‍♂️ <b>Такси шақыру</b>\n\nБағытты таңдаңыз:",
+        reply_markup=direction_keyboard,
+        parse_mode="HTML")
     await state.set_state(ClientOrder.from_city)
+
 
 
 @dp.callback_query(ClientOrder.confirm_data,
@@ -1284,13 +1290,21 @@ async def client_phone_number(message: types.Message, state: FSMContext):
 @dp.callback_query(F.data == "add_new_order")
 async def add_new_order(callback: types.CallbackQuery, state: FSMContext):
     """Add new taxi order"""
+    direction_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Ақтау → Жаңаөзен", callback_data="dir_aktau_janaozen")],
+        [InlineKeyboardButton(text="Жаңаөзен → Ақтау", callback_data="dir_janaozen_aktau")],
+        [InlineKeyboardButton(text="Ақтау → Шетпе", callback_data="dir_aktau_shetpe")],
+        [InlineKeyboardButton(text="Шетпе → Ақтау", callback_data="dir_shetpe_aktau")],
+        [InlineKeyboardButton(text="🔙 Артқа", callback_data="back_main")]
+    ])
+    
     await callback.message.edit_text(
-        "🧍‍♂️ <b>Жаңа такси шақыру</b>\n\n"
-        "Қай қаладан шығасыз?",
-        reply_markup=from_city_keyboard(),
+        "🧍‍♂️ <b>Жаңа такси шақыру</b>\n\nБағытты таңдаңыз:",
+        reply_markup=direction_keyboard,
         parse_mode="HTML")
     await state.set_state(ClientOrder.from_city)
     await callback.answer()
+
 
 
 @dp.callback_query(F.data == "view_my_orders")
@@ -1775,13 +1789,19 @@ async def finalize_order_from_message(message: types.Message,
 
 
 @dp.callback_query(F.data == "add_another_yes")
-async def add_another_order_callback(callback: types.CallbackQuery,
-                                     state: FSMContext):
+async def add_another_order_callback(callback: types.CallbackQuery, state: FSMContext):
     """Add another taxi order"""
+    direction_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Ақтау → Жаңаөзен", callback_data="dir_aktau_janaozen")],
+        [InlineKeyboardButton(text="Жаңаөзен → Ақтау", callback_data="dir_janaozen_aktau")],
+        [InlineKeyboardButton(text="Ақтау → Шетпе", callback_data="dir_aktau_shetpe")],
+        [InlineKeyboardButton(text="Шетпе → Ақтау", callback_data="dir_shetpe_aktau")],
+        [InlineKeyboardButton(text="🔙 Артқа", callback_data="back_main")]
+    ])
+    
     await callback.message.edit_text(
-        "🧍‍♂️ <b>Жаңа тапсырыс</b>\n\n"
-        "Қай қаладан шығасыз?",
-        reply_markup=from_city_keyboard(),
+        "🧍‍♂️ <b>Жаңа тапсырыс</b>\n\nБағытты таңдаңыз:",
+        reply_markup=direction_keyboard,
         parse_mode="HTML")
     await state.set_state(ClientOrder.from_city)
     await callback.answer()
