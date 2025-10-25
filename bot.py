@@ -24,6 +24,9 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 DATABASE_FILE = os.getenv("DATABASE_FILE", "taxi_bot.db")
 DB_TIMEOUT = 30.0
 
+ADMIN_PHONE = os.getenv("ADMIN_PHONE", "")
+ADMIN_USER_LOGIN = os.getenv("ADMIN_USER_LOGIN", "")
+
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
@@ -1168,11 +1171,11 @@ async def driver_reject_new_order(callback: types.CallbackQuery):
 async def client_start(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
 
-    # Check if client is already registered (any status)
+    # Check if client profile exists
     async with get_db() as db:
         async with db.execute(
-                "SELECT user_id FROM clients WHERE parent_user_id=? OR user_id=? LIMIT 1",
-            (user_id, user_id)) as cursor:
+                "SELECT user_id, full_name, phone FROM clients WHERE user_id=? AND status='registered'",
+            (user_id,)) as cursor:
             client = await cursor.fetchone()
 
     if client:
@@ -1298,8 +1301,6 @@ async def view_my_orders(callback: types.CallbackQuery):
 
         msg += f"{emoji} <b>Тапсырыс #{order[3]}</b>\n"
         msg += f"   👥 {order[6]} адам | 📍 {order[5]}\n"
-        msg += f"   Қайдан: {order[7]}\n"
-        msg += f"   Қайда: {order[8]}\n\n"
 
         keyboard_buttons.append([
             InlineKeyboardButton(
@@ -1568,7 +1569,7 @@ async def back_from_city(callback: types.CallbackQuery, state: FSMContext):
 async def finalize_order(callback: types.CallbackQuery, state: FSMContext):
     """Finalize the order and offer to add another"""
     data = await state.get_data()
-
+    
     direction = data.get(
         'direction',
         f"{data.get('from_city', '')} → {data.get('to_city', '')}")
@@ -1578,6 +1579,10 @@ async def finalize_order(callback: types.CallbackQuery, state: FSMContext):
     # Count existing orders to assign order number
     current_orders = await count_user_orders(callback.from_user.id)
     order_number = current_orders + 1
+    
+    # Generate unique user_id for this order
+    import time
+    order_user_id = int(f"{callback.from_user.id}{int(time.time() * 1000) % 100000}")
 
     async with get_db(write=True) as db:
         # Set queue position
@@ -1588,25 +1593,31 @@ async def finalize_order(callback: types.CallbackQuery, state: FSMContext):
 
         queue_pos = (max_pos or 0) + 1
 
-        # Delete old entry if exists
-        await db.execute(
-            'DELETE FROM clients WHERE user_id=? AND status="registered"',
-            (callback.from_user.id, ))
+        # Get client profile data
+        async with db.execute(
+                "SELECT full_name, phone FROM clients WHERE user_id=? AND status='registered'",
+            (callback.from_user.id,)) as cursor:
+            profile = await cursor.fetchone()
+        
+        if not profile:
+            await callback.answer("❌ Профиль табылмады! /start командасын пайдаланыңыз", show_alert=True)
+            return
+        
+        client_name, client_phone = profile
 
-        # Add client - use callback.from_user.id directly as user_id
+        # Create new order entry (separate from profile)
         await db.execute(
             '''INSERT INTO clients 
             (user_id, full_name, phone, direction, from_city, to_city, 
              queue_position, passengers_count, 
              is_verified, status, order_number, parent_user_id)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'waiting', ?, ?)''',
-            (callback.from_user.id,  # user_id = actual user ID
-             callback.from_user.full_name or "Клиент",
-             f"@{callback.from_user.username}" if callback.from_user.username
-             else f"tg_{callback.from_user.id}", 
+            (order_user_id,  # unique ID for this order
+             client_name,
+             client_phone,
              direction, from_city, to_city,
              queue_pos, data['passengers_count'], 
-             order_number, callback.from_user.id))  # parent_user_id = same user
+             order_number, callback.from_user.id))  # parent_user_id = actual user
 
         # Check suitable drivers
         async with db.execute(
@@ -1633,10 +1644,10 @@ async def finalize_order(callback: types.CallbackQuery, state: FSMContext):
             keyboard = InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(
                     text="✅ Қабылдау",
-                    callback_data=f"accept_client_{callback.from_user.id}"),
+                    callback_data=f"accept_client_{order_user_id}"),  # use order_user_id
                 InlineKeyboardButton(
                     text="❌ Бас тарту",
-                    callback_data=f"driver_reject_{callback.from_user.id}")
+                    callback_data=f"driver_reject_{order_user_id}")  # use order_user_id
             ]])
 
             await bot.send_message(
@@ -1683,6 +1694,8 @@ async def finalize_order_from_message(message: types.Message, state: FSMContext)
     
     current_orders = await count_user_orders(message.from_user.id)
     order_number = current_orders + 1
+    
+    order_user_id = int(f"{message.from_user.id}{int(time.time() * 1000) % 100000}")
 
     async with get_db(write=True) as db:
 
@@ -1696,26 +1709,32 @@ async def finalize_order_from_message(message: types.Message, state: FSMContext)
             max_pos = (await cursor.fetchone())[0]
 
         queue_pos = (max_pos or 0) + 1
+        
+        # Get client profile data
+        async with db.execute(
+                "SELECT full_name, phone FROM clients WHERE user_id=? AND status='registered'",
+            (message.from_user.id,)) as cursor:
+            profile = await cursor.fetchone()
+        
+        if not profile:
+            await message.answer("❌ Профиль табылмады! /start командасын пайдаланыңыз", show_alert=True)
+            return
+        
+        client_name, client_phone = profile
 
-        # Delete old entry if exists
-        await db.execute(
-            'DELETE FROM clients WHERE user_id=? AND status="registered"',
-            (message.from_user.id, ))
-
-        # Add client - use message.from_user.id directly
+        # Create new order entry (separate from profile)
         await db.execute(
             '''INSERT INTO clients 
             (user_id, full_name, phone, direction, from_city, to_city, 
              queue_position, passengers_count, 
              is_verified, status, order_number, parent_user_id)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'waiting', ?, ?)''',
-            (message.from_user.id,  # user_id = actual user ID
-             message.from_user.full_name or "Клиент",
-             f"@{message.from_user.username}" if
-             message.from_user.username else f"tg_{message.from_user.id}",
+            (order_user_id,  # unique ID for this order
+             client_name,
+             client_phone,
              direction, from_city, to_city,
              queue_pos, data['passengers_count'],
-             order_number, message.from_user.id))  # parent_user_id = same user
+             order_number, message.from_user.id))  # parent_user_id = actual user
 
         async with db.execute(
                 '''SELECT COUNT(*) FROM drivers 
@@ -1740,10 +1759,10 @@ async def finalize_order_from_message(message: types.Message, state: FSMContext)
             keyboard = InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(
                     text="✅ Қабылдау",
-                    callback_data=f"accept_client_{message.from_user.id}"),
+                    callback_data=f"accept_client_{order_user_id}"),
                 InlineKeyboardButton(
                     text="❌ Бас тарту",
-                    callback_data=f"driver_reject_{message.from_user.id}")
+                    callback_data=f"driver_reject_{order_user_id}")
             ]])
 
             await bot.send_message(
@@ -1817,8 +1836,8 @@ async def show_client_menu(message: types.Message, user_id: int):
     """Show client profile and menu"""
     async with get_db() as db:
         async with db.execute(
-            "SELECT full_name, phone, avg_rating, rating_count FROM clients WHERE parent_user_id=? OR user_id=? LIMIT 1",
-            (user_id, user_id)) as cursor:
+            "SELECT full_name, phone, avg_rating, rating_count FROM clients WHERE user_id=? AND status='registered'",
+            (user_id,)) as cursor:
             client = await cursor.fetchone()
     
     if not client:
@@ -2089,8 +2108,8 @@ async def info_command(message: types.Message):
         "- Ақтау – Шетпе – Ақтау → 1 орын – 2000 тг\n\n"
         "⚠️ Маңызды:\n"
         "Жалған тапсырыс беру батырмасын негізсіз басу жағдайлары анықталған қолданушыларға 2 айға желіні пайдалану шектеуі қойылады.\n\n"
-        "Сапарларыңыз сәтті, жолдарыңыз ашық болсын! 🚗💨"
-        "❌ Қате орын алған жағдайда админге хабарласыңыз: @nicekhan немесе Whatsapp: +7 702 501 01 08",
+        "Сапарларыңыз сәтті, жолдарыңыз ашық болсын! 🚗💨\n\n"
+        f"❌ Қате орын алған жағдайда админге хабарласыңыз: {ADMIN_USER_LOGIN} немесе Whatsapp: {ADMIN_PHONE}",
         reply_markup=main_menu_keyboard(),
         parse_mode="HTML")
 
@@ -2192,8 +2211,6 @@ async def admin_clients(callback: types.CallbackQuery):
             msg += f"№{client[4]} {status_emoji.get(client[10], '❓')} - {client[1]}\n"
             msg += f"   📍 {client[3]}\n"
             msg += f"   👥 {client[5]} адам.\n"
-            msg += f"   Қайдан: {client[6]}\n"
-            msg += f"   Қайда: {client[7]}\n"
             if client[11]:
                 msg += f"   🚗 Жүргізуші: ID {client[11]}\n"
             msg += "\n"
