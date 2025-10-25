@@ -1244,17 +1244,20 @@ async def confirm_client_telegram_data(callback: types.CallbackQuery,
 async def client_phone_number(message: types.Message, state: FSMContext):
     data = await state.get_data()
     phone = message.text.strip()
+    
+    # Сохраняем телефон в state
+    await state.update_data(phone_number=phone)
 
+    # Создаем профиль клиента СРАЗУ
     async with get_db(write=True) as db:
-        # Use INSERT OR IGNORE to prevent duplicates
         await db.execute(
           '''INSERT OR IGNORE INTO clients
             (user_id, full_name, phone, direction, queue_position,
              passengers_count, is_verified, status, from_city, to_city)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+             VALUES (?, ?, ?, '', 0, 1, 1, 'registered', '', '')''',
           (message.from_user.id,
            data.get('full_name', message.from_user.full_name or "Клиент"),
-           phone, '', 0, 1, 1, 'registered', '', ''))
+           phone, ))
 
     await save_log_action(message.from_user.id, "client_registered",
                           f"Phone: {phone}")
@@ -1263,7 +1266,10 @@ async def client_phone_number(message: types.Message, state: FSMContext):
         "✅ <b>Тіркелу аяқталды!</b>\n\n"
         "💡 Кеңес: Клиент мәзіріне тез өту үшін /client командасын пайдаланыңыз",
         parse_mode="HTML")
-    await start_new_order(message, state)
+    
+    # Показываем меню клиента сразу
+    await show_client_menu(message, message.from_user.id)
+    await state.clear()
 
 
 @dp.callback_query(F.data == "add_new_order")
@@ -1569,70 +1575,41 @@ async def back_from_city(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(ClientOrder.from_city)
     await callback.answer()
 
-async def finalize_order(callback: types.CallbackQuery, state: FSMContext):
-    """Finalize the order and offer to add another"""
-    data = await state.get_data()
+async with get_db(write=True) as db:
+    # Set queue position
+    async with db.execute(
+            "SELECT MAX(queue_position) FROM clients WHERE direction=?",
+        (direction, )) as cursor:
+        max_pos = (await cursor.fetchone())[0]
+
+    queue_pos = (max_pos or 0) + 1
+
+    # Get client profile
+    async with db.execute(
+            "SELECT full_name, phone FROM clients WHERE user_id=? AND status='registered'",
+        (callback.from_user.id,)) as cursor:
+        profile = await cursor.fetchone()
     
-    direction = data.get(
-        'direction',
-        f"{data.get('from_city', '')} → {data.get('to_city', '')}")
-    from_city = data.get('from_city', '')
-    to_city = data.get('to_city', '')
-
-    # Count existing orders to assign order number
-    current_orders = await count_user_orders(callback.from_user.id)
-    order_number = current_orders + 1
+    if not profile:
+        await callback.answer("❌ Ошибка: профиль не найден. Попробуйте /start", show_alert=True)
+        await state.clear()
+        return
     
-    # Generate unique user_id for this order
-    import time
-    order_user_id = int(f"{callback.from_user.id}{int(time.time() * 1000) % 100000}")
+    client_name, client_phone = profile
 
-    async with get_db(write=True) as db:
-        # Set queue position
-        async with db.execute(
-                "SELECT MAX(queue_position) FROM clients WHERE direction=?",
-            (direction, )) as cursor:
-            max_pos = (await cursor.fetchone())[0]
-
-        queue_pos = (max_pos or 0) + 1
-
-        # Get or create client profile
-        async with db.execute(
-                "SELECT full_name, phone FROM clients WHERE user_id=? AND status='registered'",
-            (callback.from_user.id,)) as cursor:
-            profile = await cursor.fetchone()
-        
-        if not profile:
-            # Create profile if doesn't exist
-            client_name = data.get('full_name', callback.from_user.full_name or "Клиент")
-            client_phone = data.get('phone_number', f"@{callback.from_user.username}" if callback.from_user.username else f"tg_{callback.from_user.id}")
-    
-            # Create profile with explicit commit
-            await db.execute(
-                '''INSERT OR IGNORE INTO clients
-                (user_id, full_name, phone, direction, queue_position,
-                 passengers_count, is_verified, status, from_city, to_city)
-                 VALUES (?, ?, ?, '', 0, 1, 1, 'registered', '', '')''',
-                 (callback.from_user.id, client_name, client_phone))
-    
-            # Update profile variable so it's available for order creation
-            profile = (client_name, client_phone)
-        else:
-            client_name, client_phone = profile
-
-        # Create new order entry (separate from profile)
-        await db.execute(
-            '''INSERT INTO clients 
-            (user_id, full_name, phone, direction, from_city, to_city, 
-             queue_position, passengers_count, 
-             is_verified, status, order_number, parent_user_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'waiting', ?, ?)''',
-            (order_user_id,  # unique ID for this order
-             client_name,
-             client_phone,
-             direction, from_city, to_city,
-             queue_pos, data['passengers_count'], 
-             order_number, callback.from_user.id))  # parent_user_id = actual user
+    # Create new order entry (separate from profile)
+    await db.execute(
+        '''INSERT INTO clients 
+        (user_id, full_name, phone, direction, from_city, to_city, 
+         queue_position, passengers_count, 
+         is_verified, status, order_number, parent_user_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'waiting', ?, ?)''',
+        (order_user_id,  # unique ID for this order
+         client_name,
+         client_phone,
+         direction, from_city, to_city,
+         queue_pos, data['passengers_count'], 
+         order_number, callback.from_user.id))  # parent_user_id = actual user
 
         # Check suitable drivers
         async with db.execute(
