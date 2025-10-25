@@ -1251,25 +1251,51 @@ async def client_phone_number(message: types.Message, state: FSMContext):
     # Создаем профиль клиента СРАЗУ
     async with get_db(write=True) as db:
         await db.execute(
-          '''INSERT OR IGNORE INTO clients
+            '''INSERT INTO clients
             (user_id, full_name, phone, direction, queue_position,
              passengers_count, is_verified, status, from_city, to_city)
-             VALUES (?, ?, ?, '', 0, 1, 1, 'registered', '', '')''',
-          (message.from_user.id,
-           data.get('full_name', message.from_user.full_name or "Клиент"),
-           phone, ))
+             VALUES (?, ?, ?, '', 0, 1, 1, 'registered', '', '')
+             ON CONFLICT(user_id)
+             DO UPDATE SET 
+             full_name=excluded.full_name,
+             phone=excluded.phone,
+             status='registered',
+             is_verified=1,
+             direction='',
+             queue_position=0,
+             passengers_count=1,
+             from_city='',
+             to_city='' ''',
+             (message.from_user.id,
+              data.get('full_name', message.from_user.full_name or "Клиент"),
+              phone)
+        )
 
-    await save_log_action(message.from_user.id, "client_registered",
-                          f"Phone: {phone}")
+    
+    await state.clear()
+    await save_log_action(message.from_user.id, "client_registered", f"Phone: {phone}")
 
     await message.answer(
         "✅ <b>Тіркелу аяқталды!</b>\n\n"
         "💡 Кеңес: Клиент мәзіріне тез өту үшін /client командасын пайдаланыңыз",
-        parse_mode="HTML")
+        parse_mode="HTML"
+    )
     
-    # Показываем меню клиента сразу
-    await show_client_menu(message, message.from_user.id)
-    await state.clear()
+    await asyncio.sleep(0.3)
+
+    # Повторная проверка перед вызовом меню
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT user_id FROM clients WHERE user_id=? AND status='registered'",
+            (message.from_user.id,)
+        ) as cursor:
+            exists = await cursor.fetchone()
+
+    if exists:
+        await show_client_menu(message, message.from_user.id)
+    else:
+        await message.answer("⚠️ Уақытша қате, /start командасын қайта көріңіз.")
+
 
 
 @dp.callback_query(F.data == "add_new_order")
