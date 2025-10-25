@@ -1170,6 +1170,9 @@ async def driver_reject_new_order(callback: types.CallbackQuery):
 @dp.message(F.text == "🧍‍♂️ Такси шақыру")
 async def client_start(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
+    
+    # Clear any previous state
+    await state.clear()
 
     # Check if client profile exists
     async with get_db() as db:
@@ -1603,13 +1606,17 @@ async def finalize_order(callback: types.CallbackQuery, state: FSMContext):
             # Create profile if doesn't exist
             client_name = data.get('full_name', callback.from_user.full_name or "Клиент")
             client_phone = data.get('phone_number', f"@{callback.from_user.username}" if callback.from_user.username else f"tg_{callback.from_user.id}")
-            
+    
+            # Create profile with explicit commit
             await db.execute(
                 '''INSERT OR IGNORE INTO clients
                 (user_id, full_name, phone, direction, queue_position,
                  passengers_count, is_verified, status, from_city, to_city)
                  VALUES (?, ?, ?, '', 0, 1, 1, 'registered', '', '')''',
-                (callback.from_user.id, client_name, client_phone))
+                 (callback.from_user.id, client_name, client_phone))
+    
+            # Update profile variable so it's available for order creation
+            profile = (client_name, client_phone)
         else:
             client_name, client_phone = profile
 
@@ -1895,10 +1902,10 @@ async def show_profile(message: types.Message):
             (user_id, )) as cursor:
             driver = await cursor.fetchone()
 
-        # Check if user is a client
+        # Check if user is a client - ИСПРАВЛЕНО ТУТ!
         async with db.execute(
-                "SELECT user_id FROM clients WHERE parent_user_id=? OR user_id=? LIMIT 1",
-            (user_id, user_id)) as cursor:
+                "SELECT user_id FROM clients WHERE user_id=? AND status='registered'",
+            (user_id,)) as cursor:
             client = await cursor.fetchone()
 
     # No profile found
