@@ -1593,17 +1593,25 @@ async def finalize_order(callback: types.CallbackQuery, state: FSMContext):
 
         queue_pos = (max_pos or 0) + 1
 
-        # Get client profile data
+        # Get or create client profile
         async with db.execute(
                 "SELECT full_name, phone FROM clients WHERE user_id=? AND status='registered'",
             (callback.from_user.id,)) as cursor:
             profile = await cursor.fetchone()
         
         if not profile:
-            await callback.answer("❌ Профиль табылмады! /start командасын пайдаланыңыз", show_alert=True)
-            return
-        
-        client_name, client_phone = profile
+            # Create profile if doesn't exist
+            client_name = data.get('full_name', callback.from_user.full_name or "Клиент")
+            client_phone = data.get('phone_number', f"@{callback.from_user.username}" if callback.from_user.username else f"tg_{callback.from_user.id}")
+            
+            await db.execute(
+                '''INSERT OR IGNORE INTO clients
+                (user_id, full_name, phone, direction, queue_position,
+                 passengers_count, is_verified, status, from_city, to_city)
+                 VALUES (?, ?, ?, '', 0, 1, 1, 'registered', '', '')''',
+                (callback.from_user.id, client_name, client_phone))
+        else:
+            client_name, client_phone = profile
 
         # Create new order entry (separate from profile)
         await db.execute(
