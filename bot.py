@@ -2413,7 +2413,40 @@ async def admin_logs(callback: types.CallbackQuery):
 
     await safe_edit_message(callback, msg, reply_markup=admin_keyboard())
     await callback.answer()
+    
+@dp.message(Command("listadmins"))
+async def list_admins_command(message: types.Message):
+    """Показать всех админов (только для админов)"""
+    if not await is_admin(message.from_user.id):
+        await message.answer("❌ Тыйым салынған")
+        return
 
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT user_id, added_at FROM admins ORDER BY added_at"
+        ) as cursor:
+            admins = await cursor.fetchall()
+
+    if not admins:
+        await message.answer("❌ Админдер жоқ!")
+        return
+
+    msg = "👑 <b>Админдер тізімі:</b>\n\n"
+    
+    for i, admin in enumerate(admins, 1):
+        msg += f"{i}. User ID: <code>{admin[0]}</code>\n"
+        if admin[1]:
+            try:
+                from datetime import datetime
+                date = datetime.fromisoformat(admin[1]).strftime('%d.%m.%Y %H:%M')
+                msg += f"   📅 Қосылған: {date}\n"
+            except:
+                pass
+        msg += "\n"
+
+    msg += f"\n<b>Жалпы:</b> {len(admins)} админ"
+    
+    await message.answer(msg, parse_mode="HTML")
 
 @dp.message(Command("addadmin"))
 async def add_admin_command(message: types.Message):
