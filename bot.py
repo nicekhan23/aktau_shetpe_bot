@@ -296,25 +296,27 @@ async def add_to_blacklist(user_id: int, reason: str, cancellation_count: int):
 
 
 async def get_user_active_orders(user_id: int) -> list:
-    """Returns all active orders for the user"""
+    """Returns all active orders for the user (excluding profile)"""
     async with get_db() as db:
         async with db.execute(
                 '''SELECT user_id, full_name, order_for, order_number, status, 
                       direction, passengers_count, from_city, to_city,
                       assigned_driver_id
                FROM clients 
-               WHERE parent_user_id=? OR user_id=?
+               WHERE (parent_user_id=? OR (user_id=? AND parent_user_id IS NULL))
+               AND status != 'registered'
                ORDER BY order_number''', (user_id, user_id)) as cursor:
             return await cursor.fetchall()
 
 
 async def count_user_orders(user_id: int) -> int:
-    """Counts the number of active orders for the user"""
+    """Counts the number of active orders for the user (excluding profile)"""
     async with get_db() as db:
         async with db.execute(
                 '''SELECT COUNT(*) FROM clients 
-               WHERE (parent_user_id=? OR user_id=?) 
-               AND status IN ('waiting', 'accepted', 'driver_arrived')''',
+               WHERE (parent_user_id=? OR (user_id=? AND parent_user_id IS NULL)) 
+               AND status IN ('waiting', 'accepted', 'driver_arrived')
+               AND status != 'registered' ''',
             (user_id, user_id)) as cursor:
             result = await cursor.fetchone()
             return result[0] if result else 0
@@ -1037,7 +1039,7 @@ async def rate_later_handler(callback: types.CallbackQuery):
 async def save_rating_to_db(user_id: int, trip_id: int, rating: int, review: str = None):
     """Helper function to save rating to database"""
     async with get_db(write=True) as db:
-        # Get trip details
+        # Получаем данные о поездке
         async with db.execute(
             '''SELECT driver_id, client_id FROM trips WHERE id=?''',
             (trip_id,)) as cursor:
@@ -1047,11 +1049,15 @@ async def save_rating_to_db(user_id: int, trip_id: int, rating: int, review: str
             logger.error(f"Trip {trip_id} not found")
             return
         
-        is_driver = trip[0] == user_id
-        target_id = trip[1] if is_driver else trip[0]
-        user_type = "driver" if not is_driver else "client"
+        driver_id = trip[0]
+        client_id = trip[1]
         
-        # Check if rating already exists
+        # ТОЛЬКО клиенты могут оценивать водителей
+        if user_id != client_id:
+            logger.warning(f"User {user_id} tried to rate trip {trip_id} but is not the client")
+            return
+        
+        # Проверяем, существует ли уже оценка
         async with db.execute(
             '''SELECT id FROM ratings 
                WHERE from_user_id=? AND trip_id=?''',
@@ -1062,21 +1068,20 @@ async def save_rating_to_db(user_id: int, trip_id: int, rating: int, review: str
             logger.warning(f"Rating already exists for trip {trip_id} from user {user_id}")
             return
         
-        # Insert rating
+        # Вставляем оценку (клиент оценивает водителя)
         await db.execute(
             '''INSERT INTO ratings (from_user_id, to_user_id, user_type, trip_id, rating, review)
-               VALUES (?, ?, ?, ?, ?, ?)''',
-            (user_id, target_id, user_type, trip_id, rating, review))
+               VALUES (?, ?, 'driver', ?, ?, ?)''',
+            (user_id, driver_id, trip_id, rating, review))
         
-        # Update average rating
-        table = "drivers" if user_type == "driver" else "clients"
+        # Обновляем средний рейтинг водителя
         await db.execute(
-            f'''UPDATE {table} 
-                SET avg_rating = (SELECT AVG(rating) FROM ratings WHERE to_user_id=?),
-                    rating_count = (SELECT COUNT(*) FROM ratings WHERE to_user_id=?)
-                WHERE user_id=?''', (target_id, target_id, target_id))
+            '''UPDATE drivers 
+                SET avg_rating = (SELECT AVG(rating) FROM ratings WHERE to_user_id=? AND user_type='driver'),
+                    rating_count = (SELECT COUNT(*) FROM ratings WHERE to_user_id=? AND user_type='driver')
+                WHERE user_id=?''', (driver_id, driver_id, driver_id))
     
-    await save_log_action(user_id, "rating_submitted", f"Target: {target_id}, Rating: {rating}")
+    await save_log_action(user_id, "rating_submitted", f"Driver: {driver_id}, Rating: {rating}")
 
 @dp.callback_query(F.data == "driver_menu")
 async def driver_menu_back(callback: types.CallbackQuery):
@@ -1248,29 +1253,35 @@ async def client_phone_number(message: types.Message, state: FSMContext):
     # Сохраняем телефон в state
     await state.update_data(phone_number=phone)
 
-    # Создаем профиль клиента СРАЗУ
+    # Создаем ТОЛЬКО профиль клиента (не заказ!)
     async with get_db(write=True) as db:
-        await db.execute(
-            '''INSERT INTO clients
-            (user_id, full_name, phone, direction, queue_position,
-             passengers_count, is_verified, status, from_city, to_city)
-             VALUES (?, ?, ?, '', 0, 1, 1, 'registered', '', '')
-             ON CONFLICT(user_id)
-             DO UPDATE SET 
-             full_name=excluded.full_name,
-             phone=excluded.phone,
-             status='registered',
-             is_verified=1,
-             direction='',
-             queue_position=0,
-             passengers_count=1,
-             from_city='',
-             to_city='' ''',
-             (message.from_user.id,
-              data.get('full_name', message.from_user.full_name or "Клиент"),
-              phone)
-        )
-
+        # Проверяем, есть ли уже профиль
+        async with db.execute(
+            "SELECT user_id FROM clients WHERE user_id=? AND status='registered'",
+            (message.from_user.id,)) as cursor:
+            existing = await cursor.fetchone()
+        
+        if not existing:
+            # Создаем профиль ТОЛЬКО если его нет
+            await db.execute(
+                '''INSERT INTO clients
+                (user_id, full_name, phone, direction, queue_position,
+                 passengers_count, is_verified, status, from_city, to_city)
+                 VALUES (?, ?, ?, '', 0, 0, 1, 'registered', '', '')''',
+                 (message.from_user.id,
+                  data.get('full_name', message.from_user.full_name or "Клиент"),
+                  phone)
+            )
+        else:
+            # Обновляем существующий профиль
+            await db.execute(
+                '''UPDATE clients 
+                SET full_name=?, phone=?, is_verified=1 
+                WHERE user_id=? AND status='registered' ''',
+                (data.get('full_name', message.from_user.full_name or "Клиент"),
+                 phone,
+                 message.from_user.id)
+            )
     
     await state.clear()
     await save_log_action(message.from_user.id, "client_registered", f"Phone: {phone}")
@@ -1282,19 +1293,7 @@ async def client_phone_number(message: types.Message, state: FSMContext):
     )
     
     await asyncio.sleep(0.3)
-
-    # Повторная проверка перед вызовом меню
-    async with get_db() as db:
-        async with db.execute(
-            "SELECT user_id FROM clients WHERE user_id=? AND status='registered'",
-            (message.from_user.id,)
-        ) as cursor:
-            exists = await cursor.fetchone()
-
-    if exists:
-        await show_client_menu(message, message.from_user.id)
-    else:
-        await message.answer("⚠️ Уақытша қате, /start командасын қайта көріңіз.")
+    await show_client_menu(message, message.from_user.id)
 
 
 
@@ -1324,18 +1323,43 @@ async def view_my_orders(callback: types.CallbackQuery):
     active_orders = await get_user_active_orders(callback.from_user.id)
 
     if not active_orders:
-        await callback.answer("❌ Белсенді тапсырыстар жоқ", show_alert=True)
+        # Если нет активных заказов, предложить создать
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Жаңа тапсырыс жасау", callback_data="add_new_order")],
+            [InlineKeyboardButton(text="🔙 Артқа", callback_data="back_main")]
+        ])
+        
+        await callback.message.edit_text(
+            "📋 <b>Белсенді тапсырыстар</b>\n\n"
+            "❌ Сіздің белсенді тапсырыстарыңыз жоқ.\n\n"
+            "Жаңа тапсырыс жасағыңыз келе ме?",
+            reply_markup=keyboard,
+            parse_mode="HTML")
+        await callback.answer()
         return
 
     msg = "🚖 <b>Сіздің белсенді тапсырыстарыңыз:</b>\n\n"
     keyboard_buttons = []
 
     for order in active_orders:
+        status_map = {
+            'waiting': '⏳ Күтілуде',
+            'accepted': '✅ Қабылданды',
+            'driver_arrived': '🚗 Жүргізуші келді'
+        }
         status_emoji = {'waiting': '⏳', 'accepted': '✅', 'driver_arrived': '🚗'}
         emoji = status_emoji.get(order[4], '❓')
+        status_text = status_map.get(order[4], '❓ Белгісіз')
 
         msg += f"{emoji} <b>Тапсырыс #{order[3]}</b>\n"
-        msg += f"   👥 {order[6]} адам | 📍 {order[5]}\n"
+        msg += f"   Статус: {status_text}\n"
+        msg += f"   👥 {order[6]} адам\n"
+        msg += f"   📍 {order[7]} → {order[8]}\n"
+        
+        if order[9]:  # assigned_driver_id
+            msg += f"   🚗 Жүргізуші тағайындалды\n"
+        
+        msg += "\n"
 
         keyboard_buttons.append([
             InlineKeyboardButton(
@@ -1360,13 +1384,11 @@ async def cancel_specific_order(callback: types.CallbackQuery):
     parent_user_id = callback.from_user.id
 
     try:
-        # First, get client data in read-only mode
+        # Получаем данные клиента
         async with get_db() as db:
-            # Get column names
             async with db.execute("PRAGMA table_info(clients)") as cursor:
                 columns = [col[1] for col in await cursor.fetchall()]
             
-            # Get client data
             async with db.execute("SELECT * FROM clients WHERE user_id=?",
                                   (order_user_id, )) as cursor:
                 client = await cursor.fetchone()
@@ -1375,43 +1397,52 @@ async def cancel_specific_order(callback: types.CallbackQuery):
             await callback.answer("❌ Тапсырыс табылмады", show_alert=True)
             return
 
-        # Get column indices
+        # Получаем ВСЕ необходимые индексы колонок
         user_id_idx = columns.index('user_id')
-        parent_user_id_idx = columns.index('parent_user_id') if 'parent_user_id' in columns else user_id_idx
+        status_idx = columns.index('status')
+        parent_user_id_idx = columns.index('parent_user_id') if 'parent_user_id' in columns else None
         assigned_driver_id_idx = columns.index('assigned_driver_id') if 'assigned_driver_id' in columns else None
         passengers_count_idx = columns.index('passengers_count')
         direction_idx = columns.index('direction')
         order_number_idx = columns.index('order_number') if 'order_number' in columns else None
         full_name_idx = columns.index('full_name')
-
-        # Check if this order belongs to the user
-        order_owner = client[parent_user_id_idx] if parent_user_id_idx and len(client) > parent_user_id_idx else client[user_id_idx]
+        
+        # ИСПРАВЛЕНИЕ: Проверяем, что это НЕ профиль (status != 'registered')
+        if client[status_idx] == 'registered':
+            await callback.answer("❌ Нельзя удалить профиль! Удаляйте только активные заказы.", show_alert=True)
+            return
+        
+        # Проверка владельца заказа
+        if parent_user_id_idx and len(client) > parent_user_id_idx and client[parent_user_id_idx]:
+            order_owner = client[parent_user_id_idx]
+        else:
+            order_owner = client[user_id_idx]
         
         if order_owner != parent_user_id:
             await callback.answer("❌ Бұл сіздің тапсырысыңыз емес!", show_alert=True)
             return
 
-        # Extract order details
-        driver_id = client[assigned_driver_id_idx] if assigned_driver_id_idx and len(client) > assigned_driver_id_idx else None
+        # Извлекаем данные заказа
+        driver_id = client[assigned_driver_id_idx] if assigned_driver_id_idx and len(client) > assigned_driver_id_idx and client[assigned_driver_id_idx] else None
         passengers_count = client[passengers_count_idx]
         direction = client[direction_idx]
         order_number = client[order_number_idx] if order_number_idx and len(client) > order_number_idx else 1
         client_name = client[full_name_idx]
 
-        # Get current cancellation count
+        # Получаем текущее количество отмен
         cancellation_count = await get_cancellation_count(parent_user_id)
         new_count = cancellation_count + 1
 
-        # Now perform write operations
+        # Выполняем операции записи
         async with get_db(write=True) as db:
-            # If assigned to a driver, free up seats
+            # Если назначен водитель, освобождаем места
             if driver_id:
                 await db.execute(
                     '''UPDATE drivers 
                        SET occupied_seats = COALESCE(occupied_seats, 0) - ? 
                        WHERE user_id=?''', (passengers_count, driver_id))
 
-                # Notify driver
+                # Уведомляем водителя
                 try:
                     await bot.send_message(
                         driver_id, 
@@ -1422,24 +1453,24 @@ async def cancel_specific_order(callback: types.CallbackQuery):
                 except Exception as e:
                     logger.warning(f"Couldn't notify driver {driver_id}: {e}")
 
-            # Update trip status
+            # Обновляем статус поездки
             await db.execute(
                 '''UPDATE trips SET status='cancelled', cancelled_by='client', 
                    cancelled_at=CURRENT_TIMESTAMP 
                    WHERE client_id=? AND status IN ('waiting', 'accepted', 'driver_arrived')''',
                 (order_user_id, ))
 
-            # Update cancellation count BEFORE deleting
+            # Обновляем счетчик отмен ПЕРЕД удалением
             await db.execute(
                 '''UPDATE clients SET cancellation_count=? 
-                   WHERE user_id=? OR parent_user_id=?''',
-                (new_count, parent_user_id, parent_user_id))
+                   WHERE user_id=?''',
+                (new_count, parent_user_id))
 
-            # Delete the client order
+            # Удаляем заказ клиента
             await db.execute("DELETE FROM clients WHERE user_id=?",
                              (order_user_id, ))
 
-            # Reorder queue positions
+            # Переупорядочиваем очередь
             async with db.execute(
                 '''SELECT user_id FROM clients 
                    WHERE direction=? AND status='waiting'
@@ -1455,35 +1486,44 @@ async def cancel_specific_order(callback: types.CallbackQuery):
         await save_log_action(parent_user_id, "order_cancelled",
                               f"Order #{order_number}, Cancellation #{new_count}")
 
-        # Blocking logic
+        # Логика блокировки
         if new_count == 1:
-            await callback.answer(
-                "⚠️ ЕСКЕРТУ! Екінші тапсырыс жойылған жағдайда, сіз бұғатталасыз!",
-                show_alert=True)
-            
-            # Show remaining orders
+            # Первая отмена - предупреждение
             remaining_orders = await count_user_orders(parent_user_id)
+            
+            warning_msg = (
+                "✅ <b>Тапсырыс жойылды</b>\n\n"
+                "⚠️ <b>ЕСКЕРТУ!</b> Бұл сіздің бірінші жойылған тапсырысыңыз.\n\n"
+                "🚫 Егер тағы бір тапсырыс жойсаңыз, сіз автоматты түрде БҰҒАТТАЛАСЫЗ!\n\n"
+                "Өтініш, тапсырыстарды жауапкершілікпен жасаңыз."
+            )
+            
             if remaining_orders > 0:
+                await callback.message.edit_text(warning_msg, parse_mode="HTML")
+                await asyncio.sleep(2)
                 await view_my_orders(callback)
             else:
-                await callback.message.edit_text(
-                    "✅ <b>Тапсырыс жойылды</b>\n\n"
-                    "⚠️ Бұл сіздің бірінші жойылған тапсырысыңыз.\n"
-                    "Екінші жойылған тапсырыста бұғатталасыз!\n\n"
-                    "Сіздің белсенді тапсырыстарыңыз жоқ.",
-                    parse_mode="HTML")
+                await callback.message.edit_text(warning_msg, parse_mode="HTML")
+            
+            await callback.answer("⚠️ НАЗАР! Тағы бір отмена = бұғаттау!", show_alert=True)
                     
         elif new_count >= 2:
-            reason = f"Тапсырыстарды жиі жою: ({new_count} рет)"
+            # Вторая отмена - блокировка
+            reason = f"Тапсырыстарды жиі жою: {new_count} рет"
             await add_to_blacklist(parent_user_id, reason, new_count)
 
             await callback.message.edit_text(
-                "🚫 <b>СІЗ БҰҒАТТАЛДЫҢЫЗ</b>\n\n"
-                f"Себеп: {reason}\n\n"
-                "Бұғаттан шығу үшін админге хабарласыңыз.",
+                "🚫 <b>СІЗ БҰҒАТТАЛДЫҢЫЗ!</b>\n\n"
+                f"❌ Себеп: {reason}\n\n"
+                "📵 Сіз 2 рет тапсырыс жойдыңыз.\n"
+                "Енді бот сізге қолжетімді емес.\n\n"
+                f"✅ Бұғаттан шығу үшін админге хабарласыңыз:\n"
+                f"👤 {ADMIN_USER_LOGIN}\n"
+                f"📞 {ADMIN_PHONE}",
                 parse_mode="HTML")
+            await callback.answer("🚫 БҰҒАТТАЛДЫҢЫЗ!", show_alert=True)
         else:
-            # First cancellation (new_count == 0 shouldn't happen, but just in case)
+            # Первая отмена (на всякий случай)
             remaining_orders = await count_user_orders(parent_user_id)
             if remaining_orders > 0:
                 await view_my_orders(callback)
@@ -1497,9 +1537,22 @@ async def cancel_specific_order(callback: types.CallbackQuery):
         logger.error(f"Error in cancel_specific_order: {e}", exc_info=True)
         await callback.answer("❌ Қате орын алды. Қайта көріңіз немесе админге хабарласыңыз.", show_alert=True)
 
-
 @dp.callback_query(ClientOrder.from_city, F.data.startswith("dir_"))
 async def client_from_city(callback: types.CallbackQuery, state: FSMContext):
+    # Проверка на блокировку
+    is_banned, ban_reason = await check_blacklist(callback.from_user.id)
+    if is_banned:
+        await callback.message.edit_text(
+            f"🚫 <b>Сіз бұғатталғансыз!</b>\n\n"
+            f"Себеп: {ban_reason}\n\n"
+            f"Админге хабарласыңыз:\n"
+            f"👤 {ADMIN_USER_LOGIN}\n"
+            f"📞 {ADMIN_PHONE}",
+            parse_mode="HTML")
+        await state.clear()
+        await callback.answer("❌ Бұғатталған!", show_alert=True)
+        return
+
     direction_map = {
         "dir_aktau_janaozen": "Ақтау → Жаңаөзен",
         "dir_janaozen_aktau": "Жаңаөзен → Ақтау",
@@ -1881,14 +1934,17 @@ async def show_client_menu(message: types.Message, user_id: int):
                            reply_markup=main_menu_keyboard())
         return
     
-    # Get active orders count
+    # Get active orders count (excluding profile)
     active_orders = await count_user_orders(user_id)
     
     # Get completed trips count
     async with get_db() as db:
         async with db.execute(
-            "SELECT COUNT(*) FROM trips WHERE client_id=? AND status='completed'",
-            (user_id,)) as cursor:
+            '''SELECT COUNT(*) FROM trips 
+               WHERE client_id IN (
+                   SELECT user_id FROM clients WHERE parent_user_id=? OR user_id=?
+               ) AND status='completed' ''',
+            (user_id, user_id)) as cursor:
             completed = (await cursor.fetchone())[0]
     
     msg = f"🧍‍♂️ <b>Клиент профилі</b>\n\n"
@@ -1973,34 +2029,41 @@ async def show_client_profile(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "rate_start")
 async def rate_start(callback: types.CallbackQuery, state: FSMContext):
+    # Получаем поездки, где пользователь был КЛИЕНТОМ
     async with get_db() as db:
         async with db.execute(
-                '''SELECT t.id, t.driver_id, d.full_name, t.client_id
+                '''SELECT t.id, t.driver_id, d.full_name, t.direction, t.trip_completed_at
                      FROM trips t
                      JOIN drivers d ON t.driver_id = d.user_id
-                     WHERE (t.driver_id=? OR t.client_id=?)
+                     WHERE t.client_id=?
                      AND t.status='completed'
                      AND t.id NOT IN (SELECT trip_id FROM ratings WHERE from_user_id=? AND trip_id IS NOT NULL)
-                     ORDER BY t.trip_completed_at DESC LIMIT 5''',
-            (callback.from_user.id, callback.from_user.id,
-             callback.from_user.id)) as cursor:
+                     ORDER BY t.trip_completed_at DESC LIMIT 10''',
+            (callback.from_user.id, callback.from_user.id)) as cursor:
             trips = await cursor.fetchall()
 
     if not trips:
-        await callback.answer("❌ Сапар табылмады", show_alert=True)
+        await callback.answer("❌ Бағалау үшін сапарлар жоқ", show_alert=True)
         return
 
     keyboard_buttons = []
     for trip in trips:
-        is_driver = trip[1] == callback.from_user.id
-        target_name = "Клиентті" if is_driver else f"Жүргізушіні {trip[2]}"
+        driver_name = trip[2]
+        direction = trip[3]
+        
         keyboard_buttons.append([
-            InlineKeyboardButton(text=f"бағалау {target_name}",
-                                 callback_data=f"rate_trip_{trip[0]}")
+            InlineKeyboardButton(
+                text=f"⭐ {driver_name} ({direction})",
+                callback_data=f"rate_trip_{trip[0]}")
         ])
+    
+    keyboard_buttons.append([
+        InlineKeyboardButton(text="🔙 Артқа", callback_data="back_main")
+    ])
 
     await callback.message.edit_text(
-        "✍️ <b>Сапарды бағалауды таңдаңыз:</b>",
+        "✍️ <b>Жүргізушіні бағалау:</b>\n\n"
+        "Қай сапарды бағалағыңыз келеді?",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_buttons),
         parse_mode="HTML")
     await callback.answer()
