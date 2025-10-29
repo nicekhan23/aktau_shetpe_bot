@@ -1262,12 +1262,13 @@ async def client_phone_number(message: types.Message, state: FSMContext):
             existing = await cursor.fetchone()
         
         if not existing:
-            # Создаем профиль ТОЛЬКО если его нет
+            # ✅ FIX: Add empty strings for pickup_location and dropoff_location
             await db.execute(
                 '''INSERT INTO clients
                 (user_id, full_name, phone, direction, queue_position,
-                 passengers_count, is_verified, status, from_city, to_city)
-                 VALUES (?, ?, ?, '', 0, 0, 1, 'registered', '', '')''',
+                 passengers_count, is_verified, status, from_city, to_city, 
+                 pickup_location, dropoff_location)
+                 VALUES (?, ?, ?, '', 0, 0, 1, 'registered', '', '', '', '')''',
                  (message.from_user.id,
                   data.get('full_name', message.from_user.full_name or "Клиент"),
                   phone)
@@ -1409,7 +1410,7 @@ async def cancel_specific_order(callback: types.CallbackQuery):
         
         # ИСПРАВЛЕНИЕ: Проверяем, что это НЕ профиль (status != 'registered')
         if client[status_idx] == 'registered':
-            await callback.answer("❌ Нельзя удалить профиль! Удаляйте только активные заказы.", show_alert=True)
+            await callback.answer("❌ Тапсырысты жою мүмкін емес! Тек белсенді тапсырыстарды жоюға болады.", show_alert=True)
             return
         
         # Проверка владельца заказа
