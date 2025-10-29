@@ -2225,6 +2225,21 @@ async def back_main(callback: types.CallbackQuery, state: FSMContext):
 
 # ==================== ADMIN ====================
 
+async def safe_edit_message(callback: types.CallbackQuery, text: str, 
+                            reply_markup=None, parse_mode="HTML"):
+    """Safely edit message, handle 'not modified' error"""
+    try:
+        await callback.message.edit_text(text, 
+                                        reply_markup=reply_markup,
+                                        parse_mode=parse_mode)
+    except Exception as e:
+        if "message is not modified" in str(e):
+            # Message is already the same, just answer callback
+            pass
+        else:
+            # Log unexpected errors
+            logger.error(f"Error editing message: {e}")
+            raise
 
 def admin_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -2280,9 +2295,7 @@ async def admin_drivers(callback: types.CallbackQuery):
             msg += f"   📍 {driver[6]}\n"
             msg += f"   {get_rating_stars(driver[13] if len(driver) > 13 else 0)}\n\n"
 
-    await callback.message.edit_text(msg,
-                                     reply_markup=admin_keyboard(),
-                                     parse_mode="HTML")
+    await safe_edit_message(callback, msg, reply_markup=admin_keyboard())
     await callback.answer()
 
 
@@ -2315,9 +2328,7 @@ async def admin_clients(callback: types.CallbackQuery):
                 msg += f"   🚗 Жүргізуші: ID {client[11]}\n"
             msg += "\n"
 
-    await callback.message.edit_text(msg,
-                                     reply_markup=admin_keyboard(),
-                                     parse_mode="HTML")
+    await safe_edit_message(callback, msg, reply_markup=admin_keyboard())
     await callback.answer()
 
 
@@ -2372,9 +2383,7 @@ async def admin_stats(callback: types.CallbackQuery):
     msg += f"⭐ Орташа рейтинг: {avg_rating:.1f}\n"
     msg += f"🚫 Бұғатталған пайдаланушылар: {blacklisted_users}\n"
 
-    await callback.message.edit_text(msg,
-                                     reply_markup=admin_keyboard(),
-                                     parse_mode="HTML")
+    await safe_edit_message(callback, msg, reply_markup=admin_keyboard())
     await callback.answer()
 
 
@@ -2402,9 +2411,7 @@ async def admin_logs(callback: types.CallbackQuery):
             msg += f"   {log[2]}\n"
         msg += "\n"
 
-    await callback.message.edit_text(msg,
-                                     reply_markup=admin_keyboard(),
-                                     parse_mode="HTML")
+    await safe_edit_message(callback, msg, reply_markup=admin_keyboard())
     await callback.answer()
 
 
